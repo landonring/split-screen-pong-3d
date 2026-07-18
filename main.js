@@ -492,6 +492,32 @@ window.addEventListener('keydown', (e) => {
 });
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
 
+// ---- Touch controls (tablet): drag your paddle within your half ----
+let p1Touch = null, p2Touch = null;
+function mapTouchToBounds(nx, ny, side) {
+  nx = Math.max(0, Math.min(1, nx)); ny = Math.max(0, Math.min(1, ny));
+  const bx = side > 0 ? THREE.MathUtils.lerp(bounds.minX, bounds.maxX, nx)
+                      : THREE.MathUtils.lerp(bounds.maxX, bounds.minX, nx); // P2 view is mirrored
+  const by = THREE.MathUtils.lerp(bounds.maxY, bounds.minY, ny);           // screen-top = high
+  return { x: bx, y: by };
+}
+function handleClassicTouch(e) {
+  if (polyActive || !bounds || !started || matchOver) return;
+  e.preventDefault();
+  p1Touch = null; p2Touch = null;
+  const w = window.innerWidth, h = window.innerHeight;
+  for (const t of e.touches) {
+    const x = t.clientX, y = t.clientY;
+    if (botEnabled) p1Touch = mapTouchToBounds(x / w, y / h, +1);          // solo = full screen
+    else if (x < w / 2) p1Touch = mapTouchToBounds(x / (w / 2), y / h, +1); // left half = P1
+    else p2Touch = mapTouchToBounds((x - w / 2) / (w / 2), y / h, -1);      // right half = P2
+  }
+}
+canvas.addEventListener('touchstart', handleClassicTouch, { passive: false });
+canvas.addEventListener('touchmove', handleClassicTouch, { passive: false });
+canvas.addEventListener('touchend', handleClassicTouch, { passive: false });
+canvas.addEventListener('touchcancel', handleClassicTouch, { passive: false });
+
 // Browsers block audio until a user gesture, so we can't autoplay on load.
 // Show a small hint, then on the first interaction unlock the audio engine and
 // start the home-screen music (unless a match is already under way).
@@ -832,6 +858,10 @@ function updatePaddles(dt) {
     P2.obj.position.x += p2x * s2;
     P2.obj.position.y += p2y * s2;
   }
+
+  // Touch drag overrides keyboard/stick for that paddle this frame.
+  if (p1Touch) { P1.obj.position.x = p1Touch.x; P1.obj.position.y = p1Touch.y; }
+  if (p2Touch && !botEnabled) { P2.obj.position.x = p2Touch.x; P2.obj.position.y = p2Touch.y; }
 
   for (const p of [P1, P2]) {
     p.obj.position.x = THREE.MathUtils.clamp(p.obj.position.x, bounds.minX + p.half.x, bounds.maxX - p.half.x);

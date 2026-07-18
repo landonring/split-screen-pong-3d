@@ -182,6 +182,30 @@ export function createPolyGame(renderer, opts = {}) {
     mouseY = THREE.MathUtils.clamp((e.clientY - r.t) / r.h, 0, 1);
   }
 
+  // Each player's viewport in CSS px (top-left origin), matching playerRects().
+  function cssRectForPlayer(i) {
+    const w = window.innerWidth, h = window.innerHeight;
+    if (N === 3) return { l: i * (w / 3), t: 0, w: w / 3, h };
+    const hw = w / 2, hh = h / 2;
+    const cells = [{ l: 0, t: 0 }, { l: hw, t: 0 }, { l: 0, t: hh }, { l: hw, t: hh }];
+    return { l: cells[i].l, t: cells[i].t, w: hw, h: hh };
+  }
+  // Touch drag: a touch in a player's viewport controls that player's paddle.
+  function onTouch(e) {
+    e.preventDefault();
+    for (const p of players) p.touch = null;
+    for (const t of e.touches) {
+      for (const p of players) {
+        if (!p.alive) continue;
+        const r = cssRectForPlayer(p.index);
+        if (t.clientX >= r.l && t.clientX < r.l + r.w && t.clientY >= r.t && t.clientY < r.t + r.h) {
+          p.touch = { tx: (t.clientX - r.l) / r.w, ty: (t.clientY - r.t) / r.h };
+          break;
+        }
+      }
+    }
+  }
+
   // ---- Gamepads: assign connected pads to P3, P4 in connection order -----
   function connectedPads() {
     const list = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -323,7 +347,7 @@ export function createPolyGame(renderer, opts = {}) {
         c: L / 2, h: PLAY_H / 2, prevC: L / 2, prevH: PLAY_H / 2,
         slideVel: 0, vertVel: 0,
         growUntil: 0, magnetUntil: 0, slowUntil: 0, ammo: 0, fireReady: 0,
-        vine: makeVines(), gun: null,
+        vine: makeVines(), gun: null, touch: null,
       });
       arenaGroup.add(players[players.length - 1].vine);
     }
@@ -465,7 +489,13 @@ export function createPolyGame(renderer, opts = {}) {
       const slow = p.slowUntil > now ? VINE_SLOW : 1;
       const spd = PADDLE_SPEED * dt * slow;
 
-      if (p.index === 0) {
+      if (p.touch) {
+        // Touch drag: absolute position within the player's viewport.
+        let tx = p.touch.tx, ty = p.touch.ty;
+        if (p.screenRightSign < 0) tx = 1 - tx;
+        p.c = THREE.MathUtils.lerp(cMin, cMax, tx);
+        p.h = THREE.MathUtils.lerp(hMax, hMin, ty);
+      } else if (p.index === 0) {
         // Mouse: absolute position within P1's viewport.
         let tx = mouseX, ty = mouseY;
         if (p.screenRightSign < 0) tx = 1 - tx;
@@ -1087,6 +1117,10 @@ export function createPolyGame(renderer, opts = {}) {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('mousemove', onMouseMove);
+    renderer.domElement.addEventListener('touchstart', onTouch, { passive: false });
+    renderer.domElement.addEventListener('touchmove', onTouch, { passive: false });
+    renderer.domElement.addEventListener('touchend', onTouch, { passive: false });
+    renderer.domElement.addEventListener('touchcancel', onTouch, { passive: false });
     running = true; matchOver = false; now = 0;
     speedMul = 1; speedUntil = 0; arenaSpinUntil = 0; arenaSpinAngle = 0;
     Audio.unlock();
@@ -1100,6 +1134,10 @@ export function createPolyGame(renderer, opts = {}) {
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('keyup', onKeyUp);
     window.removeEventListener('mousemove', onMouseMove);
+    renderer.domElement.removeEventListener('touchstart', onTouch);
+    renderer.domElement.removeEventListener('touchmove', onTouch);
+    renderer.domElement.removeEventListener('touchend', onTouch);
+    renderer.domElement.removeEventListener('touchcancel', onTouch);
     document.body.classList.remove('polyactive');
     if (hudRoot) { hudRoot.remove(); hudRoot = null; cardEls = []; }
   }
