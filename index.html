@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Split-Screen Pong 3D</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #05060a; }
+  #canvas { display: block; width: 100vw; height: 100vh; }
+
+  /* ---- HUD overlay ---- */
+  #hud {
+    position: fixed; inset: 0; pointer-events: none;
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif;
+    color: #eaf2ff;
+    user-select: none;
+  }
+  /* thin divider down the middle of the split screen */
+  #hud .divider {
+    position: absolute; top: 0; bottom: 0; left: 50%;
+    width: 2px; margin-left: -1px;
+    background: linear-gradient(180deg, transparent, rgba(120,180,255,.6), transparent);
+  }
+  /* Each split-screen half gets its own HUD */
+  .half { position: absolute; top: 0; bottom: 0; width: 50%; }
+  .half-l { left: 0; }
+  .half-r { right: 0; }
+
+  .topbar { position: absolute; top: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .half-l .topbar { left: 22px; align-items: flex-start; }
+  .half-r .topbar { right: 22px; align-items: flex-end; }
+
+  .pcard {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 8px 18px; border-radius: 14px;
+    background: rgba(8,13,26,.5); border: 1px solid rgba(120,180,255,.22);
+    backdrop-filter: blur(6px);
+  }
+  .pcard .pname { font-size: 12px; letter-spacing: 2px; font-weight: 800; opacity: .8; color: #eaf2ff; }
+  .pcard .pscore { font-size: 42px; font-weight: 900; line-height: .9; }
+  .half-l .pcard .pscore { color: #35e04a; text-shadow: 0 0 18px rgba(53,224,74,.5); }
+  .half-r .pcard .pscore { color: #4d8dff; text-shadow: 0 0 18px rgba(77,141,255,.5); }
+
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; max-width: 46vw; }
+  .half-r .badges { justify-content: flex-end; }
+  .badge {
+    font-size: 10px; font-weight: 800; letter-spacing: 1px;
+    padding: 3px 10px; border-radius: 999px; color: #05060a;
+    box-shadow: 0 0 12px currentColor;
+  }
+  .badge.big    { background: #5dff8f; color: #05060a; }
+  .badge.magnet { background: #ff4dd2; color: #fff; }
+  .badge.fast   { background: #ffd23f; color: #05060a; }
+  .badge.vine   { background: #4a9e3a; color: #fff; }
+
+  /* Shotgun ammo HUD (bottom-center of each half) */
+  .gunhud {
+    position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 12px 20px 13px; border-radius: 16px;
+    background: rgba(24,11,5,.62); border: 1px solid rgba(255,122,60,.6);
+    animation: gunglow 1.4s ease-in-out infinite; backdrop-filter: blur(5px);
+  }
+  .gunhud[hidden] { display: none; }
+  @keyframes gunglow {
+    0%,100% { box-shadow: 0 0 18px rgba(255,122,60,.3); }
+    50%     { box-shadow: 0 0 34px rgba(255,122,60,.65); }
+  }
+  .gunhud .shells { display: flex; gap: 5px; }
+  .shell {
+    width: 13px; height: 28px; border-radius: 5px 5px 3px 3px; position: relative;
+    background: linear-gradient(#ff5a3c 0 60%, #f0b34a 60% 100%);
+    box-shadow: 0 0 8px rgba(255,120,60,.75);
+  }
+  .shell::after {
+    content: ''; position: absolute; left: 2px; right: 2px; top: 4px; height: 3px;
+    border-radius: 2px; background: rgba(255,255,255,.55);
+  }
+  .gunhud .guntext { display: flex; align-items: baseline; gap: 8px; }
+  .gunhud .gunname { font-size: 12px; font-weight: 900; letter-spacing: 2px; color: #ffb14a; text-shadow: 0 0 12px rgba(255,140,60,.7); }
+  .gunhud .gunkey  { font-size: 10px; letter-spacing: 1px; opacity: .6; }
+
+  #matchinfo {
+    position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; letter-spacing: 3px; opacity: .6; font-weight: 700;
+    padding: 5px 16px; border-radius: 999px;
+    background: rgba(10,16,30,.4); border: 1px solid rgba(120,180,255,.18);
+  }
+
+  #toast {
+    position: absolute; top: 96px; left: 50%; transform: translateX(-50%) translateY(-6px);
+    font-size: 18px; font-weight: 800; letter-spacing: 2px;
+    padding: 8px 20px; border-radius: 999px;
+    background: rgba(10,16,30,.6); border: 1px solid rgba(255,255,255,.2);
+    backdrop-filter: blur(6px);
+    opacity: 0; transition: opacity .2s ease, transform .2s ease;
+    text-shadow: 0 0 14px currentColor;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  #viewhint {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; letter-spacing: 2px; opacity: .55;
+    padding: 5px 14px; border-radius: 999px;
+    background: rgba(10,16,30,.4); border: 1px solid rgba(120,180,255,.18);
+  }
+  body.pregame #viewhint { display: none; }
+
+  #banner {
+    position: absolute; inset: 0; z-index: 5; pointer-events: auto; /* #hud is none */
+    display: none; align-items: center; justify-content: center; flex-direction: column;
+    gap: 16px; text-align: center;
+    background: radial-gradient(circle at 50% 40%, rgba(20,30,55,.72), rgba(2,4,10,.92) 75%);
+    backdrop-filter: blur(6px);
+  }
+  #banner.show { display: flex; animation: bannerIn .5s ease; }
+  @keyframes bannerIn { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: scale(1); } }
+  #banner .trophy { font-size: 66px; animation: bob 1.6s ease-in-out infinite; filter: drop-shadow(0 0 24px rgba(255,210,90,.6)); }
+  @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+  #banner .win {
+    font-size: clamp(38px, 7vw, 76px); font-weight: 900; letter-spacing: 3px;
+    text-shadow: 0 0 40px currentColor;
+  }
+  #banner .finalscore { font-size: 30px; font-weight: 800; letter-spacing: 8px; opacity: .9; }
+  #banner .bannerbtns { display: flex; gap: 16px; margin-top: 12px; }
+  #banner .playbtn {
+    cursor: pointer; font-family: inherit; font-size: 15px; font-weight: 800; letter-spacing: 2px; color: #05060a;
+    padding: 13px 30px; border: none; border-radius: 999px;
+    background: linear-gradient(90deg, #58d0ff, #4d8dff); box-shadow: 0 0 22px rgba(88,208,255,.5);
+  }
+  #banner .playbtn:hover { filter: brightness(1.1); }
+  #banner #menuBtn {
+    cursor: pointer; font-family: inherit; font-size: 15px; font-weight: 800; letter-spacing: 2px; color: #eaf2ff;
+    padding: 13px 28px; border-radius: 999px;
+    background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.25);
+  }
+  #banner #menuBtn:hover { background: rgba(255,255,255,.2); }
+  #banner .sub { font-size: 13px; opacity: .6; letter-spacing: 2px; }
+
+  /* Countdown before the ball serves */
+  #countdown {
+    position: absolute; top: 42%; left: 50%; transform: translate(-50%,-50%);
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif; color: #eaf2ff;
+    font-size: clamp(70px, 16vw, 180px); font-weight: 900; letter-spacing: 4px;
+    text-shadow: 0 0 50px rgba(88,208,255,.7); display: none; pointer-events: none; z-index: 6;
+  }
+  #countdown.pop { animation: cdpop .55s ease; }
+  @keyframes cdpop {
+    0%   { transform: translate(-50%,-50%) scale(.4); opacity: 0; }
+    40%  { opacity: 1; }
+    100% { transform: translate(-50%,-50%) scale(1.15); opacity: .85; }
+  }
+
+  /* Solo mode (vs bot): one full-screen view of the human player */
+  body.solo .divider { display: none; }
+  body.solo .half-l { width: 100%; }
+  body.solo .half-r .gunhud { display: none; }
+
+  /* Hide the in-game HUD while the start screen is up */
+  body.pregame .half, body.pregame #matchinfo { display: none; }
+
+  /* ---- Start screen ---- */
+  #start {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif;
+    color: #eaf2ff; user-select: none;
+    background: radial-gradient(circle at 50% 35%, rgba(30,44,80,.55), rgba(3,5,12,.85) 70%);
+    backdrop-filter: blur(3px);
+    transition: opacity .4s ease;
+  }
+  #start.hidden { opacity: 0; pointer-events: none; }
+  #start .menu {
+    display: flex; flex-direction: column; align-items: center; gap: 22px;
+    padding: 40px 48px; text-align: center;
+  }
+  #start .big {
+    font-size: clamp(34px, 6vw, 68px); font-weight: 900; letter-spacing: 3px;
+    background: linear-gradient(90deg, #35e04a, #58d0ff 55%, #4d8dff);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 0 40px rgba(88,208,255,.25);
+  }
+  #start .tag { font-size: 14px; letter-spacing: 4px; opacity: .65; margin-top: -12px; text-transform: uppercase; }
+  #start .controls { display: flex; gap: 26px; margin-top: 6px; }
+  #start .col {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 18px 26px; border-radius: 14px;
+    background: rgba(12,18,34,.55); border: 1px solid rgba(120,180,255,.2);
+    min-width: 170px;
+  }
+  #start .who { font-size: 13px; font-weight: 800; letter-spacing: 2px; }
+  #start .who.p1 { color: #35e04a; }
+  #start .who.p2 { color: #4d8dff; }
+  #start .keycap {
+    font-size: 22px; font-weight: 700; letter-spacing: 4px;
+    padding: 6px 14px; border-radius: 8px; background: rgba(255,255,255,.08);
+  }
+  #start .col .sub { font-size: 11px; opacity: .55; letter-spacing: 1px; }
+  #start .pulegend {
+    display: flex; flex-wrap: wrap; gap: 16px; justify-content: center;
+    font-size: 12px; opacity: .85; max-width: 460px;
+  }
+  #start .pulegend .item { display: flex; align-items: center; gap: 6px; }
+  #start .pulegend .dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 10px currentColor; }
+  #start .pulegend .note { width: 100%; opacity: .55; font-size: 11px; letter-spacing: 1px; margin-top: 2px; }
+  #start .modeswitch { display: flex; align-items: center; gap: 14px; margin-top: 4px; }
+  #start .modeswitch .opt { font-size: 13px; font-weight: 800; letter-spacing: 2px; opacity: .4; cursor: pointer; transition: opacity .2s, color .2s; }
+  #start .modeswitch .opt.left.active { opacity: 1; color: #4d8dff; }
+  #start .modeswitch .opt.right.active { opacity: 1; color: #35e04a; }
+  #start .switch {
+    position: relative; width: 64px; height: 32px; border-radius: 999px; cursor: pointer; padding: 0;
+    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.25); transition: background .2s;
+  }
+  #start .switch .knob {
+    position: absolute; top: 2px; left: 2px; width: 26px; height: 26px; border-radius: 50%;
+    background: #eaf2ff; transition: left .2s, background .2s;
+  }
+  #start .switch.on { background: rgba(53,224,74,.35); }
+  #start .switch.on .knob { left: 34px; background: #5dff8f; }
+  #start .difficulty { display: none; align-items: center; gap: 8px; }
+  #start .difficulty .difflabel { font-size: 11px; letter-spacing: 2px; opacity: .5; margin-right: 4px; }
+  #start .diffbtn {
+    cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 800; letter-spacing: 1px;
+    color: #eaf2ff; padding: 8px 16px; border-radius: 999px;
+    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18);
+  }
+  #start .diffbtn:hover { filter: brightness(1.15); }
+  #start .diffbtn.active {
+    background: linear-gradient(90deg, #5dff8f, #35e04a); color: #05060a;
+    border-color: transparent; box-shadow: 0 0 16px rgba(53,224,74,.5);
+  }
+  #start .playbtn {
+    margin-top: 6px; cursor: pointer;
+    font-family: inherit; font-size: 16px; font-weight: 800; letter-spacing: 3px; color: #05060a;
+    padding: 14px 34px; border: none; border-radius: 999px;
+    background: linear-gradient(90deg, #58d0ff, #4d8dff);
+    box-shadow: 0 0 26px rgba(88,208,255,.5);
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+  #start .playbtn:hover { filter: brightness(1.1); }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+  #start #fsMenuBtn {
+    cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 800; letter-spacing: 2px;
+    color: #eaf2ff; padding: 10px 22px; border-radius: 999px;
+    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.22);
+  }
+  #start #fsMenuBtn:hover { background: rgba(255,255,255,.18); }
+  #start .hint { font-size: 12px; opacity: .5; letter-spacing: 2px; max-width: 480px; }
+
+  /* Persistent fullscreen button (works on the menu and in-game) */
+  #fsCorner {
+    position: fixed; bottom: 14px; right: 16px; z-index: 30; cursor: pointer;
+    width: 40px; height: 40px; border-radius: 10px; font-size: 18px; line-height: 1;
+    color: #eaf2ff; background: rgba(10,16,30,.5); border: 1px solid rgba(120,180,255,.25);
+    backdrop-filter: blur(4px);
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif;
+  }
+  #fsCorner:hover { background: rgba(30,44,80,.75); }
+
+  #start .pcountsel { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+  #start .pcountsel .difflabel { font-size: 11px; letter-spacing: 2px; opacity: .5; margin-right: 4px; }
+
+  /* ---- Polygon (3/4-player) HUD, injected by poly.js ---- */
+  #polyhud {
+    position: fixed; inset: 0; pointer-events: none; z-index: 8;
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif; color: #eaf2ff; user-select: none;
+  }
+  #polyhud .pdivv { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px;
+    background: linear-gradient(180deg, transparent, rgba(120,180,255,.5), transparent); }
+  #polyhud .pdivh { position: absolute; left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px;
+    background: linear-gradient(90deg, transparent, rgba(120,180,255,.5), transparent); }
+  #polyhud .pcard { padding: 8px 14px; border-radius: 12px; background: rgba(8,13,26,.5);
+    border: 1px solid rgba(120,180,255,.22); backdrop-filter: blur(6px); min-width: 108px; transition: opacity .3s; }
+  #polyhud .pcard .pn { font-size: 11px; font-weight: 800; letter-spacing: 2px; }
+  #polyhud .pcard .ph { font-size: 20px; line-height: 1.1; margin-top: 2px; text-shadow: 0 0 12px currentColor; }
+  #polyhud .pcard .pfx { font-size: 10px; font-weight: 700; letter-spacing: 1px; opacity: .8; margin-top: 3px; }
+  #polyhud .pcount { position: absolute; top: 44%; left: 50%; transform: translate(-50%,-50%);
+    font-size: clamp(60px, 12vw, 150px); font-weight: 900; letter-spacing: 4px; display: none;
+    text-shadow: 0 0 50px rgba(88,208,255,.7); z-index: 9; }
+  #polyhud .pcount.pop { animation: cdpop .55s ease; }
+  #polyhud .ptoast { position: absolute; top: 14px; left: 50%; transform: translateX(-50%) translateY(-6px);
+    font-size: 17px; font-weight: 800; letter-spacing: 2px; padding: 8px 20px; border-radius: 999px;
+    background: rgba(10,16,30,.6); border: 1px solid rgba(255,255,255,.2); backdrop-filter: blur(6px);
+    opacity: 0; transition: opacity .2s, transform .2s; text-shadow: 0 0 14px currentColor; }
+  #polyhud .ptoast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #polyhud .pbanner { position: absolute; inset: 0; z-index: 10; pointer-events: auto; display: none;
+    align-items: center; justify-content: center; flex-direction: column; gap: 14px; text-align: center;
+    background: radial-gradient(circle at 50% 40%, rgba(20,30,55,.72), rgba(2,4,10,.92) 75%); backdrop-filter: blur(6px); }
+  #polyhud .pbanner.show { display: flex; animation: bannerIn .5s ease; }
+  #polyhud .ptrophy { font-size: 60px; animation: bob 1.6s ease-in-out infinite; filter: drop-shadow(0 0 24px rgba(255,210,90,.6)); }
+  #polyhud .pwinner { font-size: clamp(34px, 6vw, 64px); font-weight: 900; letter-spacing: 3px; text-shadow: 0 0 40px currentColor; }
+  #polyhud .pbtns { display: flex; gap: 16px; margin-top: 8px; }
+  #polyhud .pbtn { cursor: pointer; font-family: inherit; font-size: 15px; font-weight: 800; letter-spacing: 2px;
+    padding: 12px 28px; border-radius: 999px; border: none; }
+  #polyhud .prematch { color: #05060a; background: linear-gradient(90deg, #58d0ff, #4d8dff); box-shadow: 0 0 22px rgba(88,208,255,.5); }
+  #polyhud .pmenu { color: #eaf2ff; background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.25); }
+  #polyhud .psub { font-size: 12px; opacity: .6; letter-spacing: 2px; }
+  body.polyactive #hud { display: none; }
+
+  /* ---- In-battle home button ---- */
+  #homeBtn {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 45;
+    display: none; cursor: pointer; pointer-events: auto;
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif; font-size: 12px; font-weight: 800; letter-spacing: 2px;
+    color: #eaf2ff; padding: 9px 18px; border-radius: 999px;
+    background: rgba(10,16,30,.6); border: 1px solid rgba(120,180,255,.35); backdrop-filter: blur(6px);
+  }
+  #homeBtn:hover { background: rgba(30,44,80,.8); }
+  body.inbattle #homeBtn { display: block; }
+  /* nudge the classic centre banner down so it clears the home button */
+  body.inbattle:not(.polyactive) #matchinfo { top: 54px; }
+
+  /* ---- Settings menu buttons ---- */
+  #settingsMenuBtn {
+    cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 800; letter-spacing: 2px;
+    color: #eaf2ff; padding: 10px 22px; border-radius: 999px;
+    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.22);
+  }
+  #settingsMenuBtn:hover { background: rgba(255,255,255,.18); }
+
+  /* ---- Settings panel ---- */
+  #settings {
+    position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif; color: #eaf2ff;
+    background: radial-gradient(circle at 50% 40%, rgba(20,30,55,.7), rgba(2,4,10,.92) 75%);
+    backdrop-filter: blur(6px); transition: opacity .25s ease;
+  }
+  #settings.hidden { opacity: 0; pointer-events: none; }
+  #settings .setpanel {
+    width: min(560px, 92vw); max-height: 88vh; display: flex; flex-direction: column; gap: 16px;
+    padding: 26px 30px; border-radius: 20px;
+    background: rgba(10,15,28,.85); border: 1px solid rgba(120,180,255,.25);
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  #settings .settitle {
+    font-size: 26px; font-weight: 900; letter-spacing: 4px; text-align: center;
+    background: linear-gradient(90deg, #35e04a, #58d0ff 55%, #4d8dff);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  #settings .setscroll { overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
+  #settings .setsec {
+    font-size: 12px; font-weight: 800; letter-spacing: 3px; color: #7fa8e0;
+    margin-top: 10px; padding-bottom: 4px; border-bottom: 1px solid rgba(120,180,255,.2);
+  }
+  #settings .setrow { display: flex; align-items: center; gap: 12px; }
+  #settings .setlabel { flex: 0 0 150px; font-size: 13px; letter-spacing: 1px; opacity: .9; }
+  #settings .setslider { flex: 1; accent-color: #58d0ff; height: 4px; cursor: pointer; }
+  #settings .setpct { flex: 0 0 46px; text-align: right; font-size: 12px; font-weight: 700; opacity: .7; }
+  #settings .bindrow { display: flex; align-items: center; gap: 12px; }
+  #settings .bindrow .setlabel { flex: 0 0 150px; }
+  #settings .bindkey {
+    flex: 0 0 auto; min-width: 78px; text-align: center; cursor: pointer;
+    font-size: 13px; font-weight: 800; letter-spacing: 1px; color: #eaf2ff;
+    padding: 7px 14px; border-radius: 8px;
+    background: rgba(255,255,255,.08); border: 1px solid rgba(120,180,255,.3);
+  }
+  #settings .bindkey:hover { background: rgba(88,208,255,.18); }
+  #settings .bindkey.capturing { background: rgba(255,210,90,.25); border-color: #ffd23f; color: #ffd23f; }
+  #settings #resetBinds {
+    align-self: flex-start; margin-top: 10px; cursor: pointer; font-family: inherit;
+    font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #eaf2ff;
+    padding: 8px 16px; border-radius: 999px;
+    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.2);
+  }
+  #settings #resetBinds:hover { background: rgba(255,80,80,.2); border-color: rgba(255,120,120,.5); }
+  #settings #closeSettings { align-self: center; }
+</style>
+</head>
+<body class="pregame">
+  <canvas id="canvas"></canvas>
+  <button id="fsCorner" title="Toggle fullscreen (F)">&#9974;</button>
+  <button id="homeBtn" title="Back to menu">&#8962;&nbsp; HOME</button>
+
+  <div id="start">
+    <div class="menu">
+      <div class="big">SPLIT&#8209;SCREEN PONG</div>
+      <div class="tag">3D &nbsp;&middot;&nbsp; two players &nbsp;&middot;&nbsp; power&#8209;ups</div>
+
+      <div class="controls">
+        <div class="col">
+          <div class="who p1">PLAYER 1</div>
+          <div class="keycap">W A S D</div>
+          <div class="sub">move &middot; shoot: SPACE / L2</div>
+          <div class="sub">controller: LEFT stick</div>
+        </div>
+        <div class="col">
+          <div class="who p2">PLAYER 2</div>
+          <div class="keycap">&#8593; &#8592; &#8595; &#8594;</div>
+          <div class="sub">move &middot; shoot: / &nbsp;/ R2</div>
+          <div class="sub">controller: RIGHT stick</div>
+        </div>
+      </div>
+
+      <div class="pulegend">
+        <div class="item"><span class="dot" style="color:#51e0ff"></span>Multi&#8209;ball</div>
+        <div class="item"><span class="dot" style="color:#ff4dd2"></span>Magnet</div>
+        <div class="item"><span class="dot" style="color:#5dff8f"></span>Big paddle</div>
+        <div class="item"><span class="dot" style="color:#ffd23f"></span>Speed up</div>
+        <div class="item"><span class="dot" style="color:#ff7a3c"></span>Shotgun</div>
+        <div class="item"><span class="dot" style="color:#b96bff"></span>Spin arena</div>
+        <div class="item"><span class="dot" style="color:#4a9e3a"></span>Vines (slow foe)</div>
+        <div class="note">Hit the floating power&#8209;ups with the ball. Shotgun gives 5 shots &mdash; blast the incoming ball back at your opponent.</div>
+      </div>
+
+      <div class="pcountsel">
+        <span class="difflabel">PLAYERS</span>
+        <button class="diffbtn" data-pc="2">2P</button>
+        <button class="diffbtn" data-pc="3">3P</button>
+        <button class="diffbtn" data-pc="4">4P</button>
+      </div>
+
+      <div class="modeswitch">
+        <span class="opt left" data-opt2p>2 PLAYERS</span>
+        <button class="switch" data-modeswitch aria-checked="false"><span class="knob"></span></button>
+        <span class="opt right" data-opt1p>1 PLAYER &middot; BOT</span>
+      </div>
+
+      <div class="difficulty" data-difficulty>
+        <span class="difflabel">BOT SKILL</span>
+        <button class="diffbtn" data-diff="EASY">EASY</button>
+        <button class="diffbtn" data-diff="MEDIUM">MEDIUM</button>
+        <button class="diffbtn" data-diff="HARD">HARD</button>
+      </div>
+
+      <button class="playbtn" data-play>PRESS SPACE TO PLAY</button>
+      <button id="fsMenuBtn" data-fsmenu>&#9974;&nbsp; FULLSCREEN</button>
+      <button id="settingsMenuBtn">&#9881;&nbsp; SETTINGS</button>
+      <div class="hint">First to 10 wins &nbsp;&middot;&nbsp; C / &#9651; switch view &nbsp;&middot;&nbsp; F fullscreen</div>
+      <div class="hint">Controller: &#10005; start &middot; &#9651; camera &middot; L1/R1 mode</div>
+    </div>
+  </div>
+
+  <div id="hud">
+    <div class="divider"></div>
+
+    <!-- Left half = Player 1 -->
+    <div class="half half-l">
+      <div class="topbar">
+        <div class="pcard">
+          <span class="pname">PLAYER 1</span>
+          <span class="pscore" data-p1>0</span>
+        </div>
+        <div class="badges" data-p1fx></div>
+      </div>
+      <div class="gunhud" data-p1ammo hidden>
+        <div class="shells" data-p1shells></div>
+        <div class="guntext"><span class="gunname" data-p1gun>SHOTGUN</span><span class="gunkey">SPACE / L2</span></div>
+      </div>
+    </div>
+
+    <!-- Right half = Player 2 / Bot -->
+    <div class="half half-r">
+      <div class="topbar">
+        <div class="pcard">
+          <span class="pname" data-p2name>PLAYER 2</span>
+          <span class="pscore" data-p2>0</span>
+        </div>
+        <div class="badges" data-p2fx></div>
+      </div>
+      <div class="gunhud" data-p2ammo hidden>
+        <div class="shells" data-p2shells></div>
+        <div class="guntext"><span class="gunname" data-p2gun>SHOTGUN</span><span class="gunkey" data-p2key>/ or R2</span></div>
+      </div>
+    </div>
+
+    <div id="matchinfo"><span data-goal>FIRST TO 7</span></div>
+
+    <div id="toast" data-toast></div>
+
+    <div id="countdown"></div>
+
+    <div id="viewhint">VIEW: 3RD PERSON &middot; C or &#9651; to switch</div>
+
+    <div id="banner">
+      <div class="trophy">&#127942;</div>
+      <div class="win" data-winner>PLAYER 1 WINS</div>
+      <div class="finalscore" data-finalscore>0 &ndash; 0</div>
+      <div class="bannerbtns">
+        <button class="playbtn" data-rematch>REMATCH</button>
+        <button id="menuBtn" data-menu>MENU</button>
+      </div>
+      <div class="sub">press R or &#10005; to rematch &middot; L1/R1 for menu</div>
+    </div>
+  </div>
+
+  <div id="settings" class="hidden">
+    <div class="setpanel">
+      <div class="settitle">SETTINGS</div>
+      <div class="setscroll">
+        <div class="setsec">AUDIO</div>
+        <div class="setrow"><span class="setlabel">Sound (master)</span><input type="range" class="setslider" data-vol="master" min="0" max="1" step="0.01"><span class="setpct" data-pct="master"></span></div>
+        <div class="setrow"><span class="setlabel">Music</span><input type="range" class="setslider" data-vol="music" min="0" max="1" step="0.01"><span class="setpct" data-pct="music"></span></div>
+        <div class="setrow"><span class="setlabel">Ball hits</span><input type="range" class="setslider" data-vol="ball" min="0" max="1" step="0.01"><span class="setpct" data-pct="ball"></span></div>
+        <div class="setrow"><span class="setlabel">Gunshots</span><input type="range" class="setslider" data-vol="gun" min="0" max="1" step="0.01"><span class="setpct" data-pct="gun"></span></div>
+
+        <div class="setsec">CURSOR</div>
+        <div class="setrow"><span class="setlabel">Joystick sensitivity</span><input type="range" class="setslider" data-vol="sensitivity" min="0" max="1" step="0.01"><span class="setpct" data-pct="sensitivity"></span></div>
+
+        <div class="setsec">KEYBINDS</div>
+        <div id="setbinds"></div>
+        <button id="resetBinds">RESET KEYBINDS</button>
+      </div>
+      <button id="closeSettings" class="playbtn">DONE</button>
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.1/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.1/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
