@@ -172,8 +172,8 @@
   }
   #start.hidden { opacity: 0; pointer-events: none; }
   #start .menu {
-    display: flex; flex-direction: column; align-items: center; gap: 22px;
-    padding: 40px 48px; text-align: center;
+    display: flex; flex-direction: column; align-items: center; gap: 18px;
+    padding: 30px 44px; text-align: center;
   }
   #start .big {
     font-size: clamp(34px, 6vw, 68px); font-weight: 900; letter-spacing: 3px;
@@ -365,6 +365,65 @@
   }
   #settings #resetBinds:hover { background: rgba(255,80,80,.2); border-color: rgba(255,120,120,.5); }
   #settings #closeSettings { align-self: center; }
+
+  /* ---- Online 1v1 ---- */
+  #start .onlinerow { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+  #start .onlinelabel { font-size: 11px; letter-spacing: 2px; opacity: .5; margin-right: 2px; }
+  #start .onlinebtn {
+    cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 800; letter-spacing: 1px;
+    color: #eaf2ff; padding: 9px 18px; border-radius: 999px;
+    background: rgba(88,208,255,.12); border: 1px solid rgba(88,208,255,.4);
+  }
+  #start .onlinebtn:hover { background: rgba(88,208,255,.25); }
+  #start .menubar { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; max-width: 460px; }
+  #start .menubar button {
+    cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 800; letter-spacing: 1px;
+    color: #eaf2ff; padding: 10px 18px; border-radius: 999px;
+    background: rgba(255,255,255,.07); border: 1px solid rgba(120,180,255,.28);
+  }
+  #start .menubar button:hover { background: rgba(88,208,255,.18); }
+  #start .menubar .onlinebtn { background: rgba(88,208,255,.14); border-color: rgba(88,208,255,.45); }
+
+  #onlineModal {
+    position: fixed; inset: 0; z-index: 62; display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif; color: #eaf2ff;
+    background: radial-gradient(circle at 50% 40%, rgba(20,30,55,.7), rgba(2,4,10,.92) 75%);
+    backdrop-filter: blur(6px); transition: opacity .25s ease;
+  }
+  #onlineModal.hidden { opacity: 0; pointer-events: none; }
+  #onlineModal .onpanel {
+    width: min(440px, 92vw); display: flex; flex-direction: column; align-items: center; gap: 16px;
+    padding: 30px 34px; border-radius: 20px;
+    background: rgba(10,15,28,.9); border: 1px solid rgba(120,180,255,.3);
+    box-shadow: 0 20px 60px rgba(0,0,0,.5); text-align: center;
+  }
+  #onlineModal .ontitle {
+    font-size: 20px; font-weight: 900; letter-spacing: 3px;
+    background: linear-gradient(90deg, #35e04a, #58d0ff); -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  #onlineModal .onbig {
+    font-size: 46px; font-weight: 900; letter-spacing: 10px; padding: 6px 4px 2px 14px; min-height: 8px;
+    color: #58d0ff; text-shadow: 0 0 24px rgba(88,208,255,.6);
+  }
+  #onlineModal .onstatus { font-size: 13px; letter-spacing: 1px; opacity: .75; min-height: 16px; }
+  #onlineModal .oninputwrap { display: flex; gap: 10px; }
+  #onlineModal .oninputwrap[hidden] { display: none; }
+  #onlineModal #joinCode {
+    width: 150px; text-align: center; text-transform: uppercase; letter-spacing: 6px;
+    font-family: inherit; font-size: 20px; font-weight: 800; color: #eaf2ff;
+    padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,.08); border: 1px solid rgba(120,180,255,.35);
+  }
+  #onlineModal #joinGo, #onlineModal #onlineCancel {
+    cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 800; letter-spacing: 1px; color: #eaf2ff;
+    padding: 10px 20px; border-radius: 999px; border: 1px solid rgba(120,180,255,.35); background: rgba(88,208,255,.15);
+  }
+  #onlineModal #onlineCancel { background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.2); }
+  #onlineModal #joinGo:hover { background: rgba(88,208,255,.3); }
+  /* Online play: single full view — hide the split divider and the opponent's HUD half */
+  body.online .divider { display: none; }
+  body.online:not(.guest) #hud .half-r { display: none; } /* host = P1: hide P2 HUD */
+  body.online.guest #hud .half-l { display: none; }       /* guest = P2: hide P1 HUD */
+  body.online.guest #banner [data-rematch] { display: none; }
 </style>
 </head>
 <body class="pregame">
@@ -375,33 +434,7 @@
   <div id="start">
     <div class="menu">
       <div class="big">SPLIT&#8209;SCREEN PONG</div>
-      <div class="tag">3D &nbsp;&middot;&nbsp; two players &nbsp;&middot;&nbsp; power&#8209;ups</div>
-
-      <div class="controls">
-        <div class="col">
-          <div class="who p1">PLAYER 1</div>
-          <div class="keycap">W A S D</div>
-          <div class="sub">move &middot; shoot: SPACE / L2</div>
-          <div class="sub">controller: LEFT stick</div>
-        </div>
-        <div class="col">
-          <div class="who p2">PLAYER 2</div>
-          <div class="keycap">&#8593; &#8592; &#8595; &#8594;</div>
-          <div class="sub">move &middot; shoot: / &nbsp;/ R2</div>
-          <div class="sub">controller: RIGHT stick</div>
-        </div>
-      </div>
-
-      <div class="pulegend">
-        <div class="item"><span class="dot" style="color:#51e0ff"></span>Multi&#8209;ball</div>
-        <div class="item"><span class="dot" style="color:#ff4dd2"></span>Magnet</div>
-        <div class="item"><span class="dot" style="color:#5dff8f"></span>Big paddle</div>
-        <div class="item"><span class="dot" style="color:#ffd23f"></span>Speed up</div>
-        <div class="item"><span class="dot" style="color:#ff7a3c"></span>Shotgun</div>
-        <div class="item"><span class="dot" style="color:#b96bff"></span>Spin arena</div>
-        <div class="item"><span class="dot" style="color:#4a9e3a"></span>Vines (slow foe)</div>
-        <div class="note">Hit the floating power&#8209;ups with the ball. Shotgun gives 5 shots &mdash; blast the incoming ball back at your opponent.</div>
-      </div>
+      <div class="tag">3D &nbsp;&middot;&nbsp; 2&#8211;4 players &nbsp;&middot;&nbsp; power&#8209;ups</div>
 
       <div class="pcountsel">
         <span class="difflabel">PLAYERS</span>
@@ -424,10 +457,15 @@
       </div>
 
       <button class="playbtn" data-play>PRESS SPACE TO PLAY</button>
-      <button id="fsMenuBtn" data-fsmenu>&#9974;&nbsp; FULLSCREEN</button>
-      <button id="settingsMenuBtn">&#9881;&nbsp; SETTINGS</button>
-      <div class="hint">First to 10 wins &nbsp;&middot;&nbsp; C / &#9651; switch view &nbsp;&middot;&nbsp; F fullscreen</div>
-      <div class="hint">Controller: &#10005; start &middot; &#9651; camera &middot; L1/R1 mode</div>
+
+      <div class="menubar">
+        <button id="hostBtn" class="onlinebtn">&#127760; HOST</button>
+        <button id="joinBtn" class="onlinebtn">JOIN</button>
+        <button id="settingsMenuBtn">&#9881; SETTINGS</button>
+        <button id="fsMenuBtn" data-fsmenu>&#9974; FULLSCREEN</button>
+      </div>
+
+      <div class="hint">First to 10 &nbsp;&middot;&nbsp; controls &amp; keybinds in Settings</div>
     </div>
   </div>
 
@@ -484,6 +522,19 @@
     </div>
   </div>
 
+  <div id="onlineModal" class="hidden">
+    <div class="onpanel">
+      <div class="ontitle" data-ontitle>ONLINE 1v1</div>
+      <div class="onbig" data-oncode></div>
+      <div class="onstatus" data-onstatus>&nbsp;</div>
+      <div class="oninputwrap" data-oninputwrap>
+        <input id="joinCode" maxlength="6" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <button id="joinGo">CONNECT</button>
+      </div>
+      <button id="onlineCancel">CANCEL</button>
+    </div>
+  </div>
+
   <div id="settings" class="hidden">
     <div class="setpanel">
       <div class="settitle">SETTINGS</div>
@@ -505,6 +556,7 @@
     </div>
   </div>
 
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script type="importmap">
   {
     "imports": {

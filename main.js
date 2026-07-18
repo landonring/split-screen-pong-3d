@@ -6,6 +6,7 @@ import * as Audio from './audio.js';
 import * as Confetti from './confetti.js';
 import { createCursor } from './cursor.js';
 import { binds, setBind, resetBinds, BIND_META, keyLabel } from './binds.js';
+import { hostGame, joinGame } from './net.js';
 
 const gameCursor = createCursor();
 
@@ -214,6 +215,8 @@ let botLevel = 'MEDIUM'; // key into BOT_LEVELS
 let playerCount = 2;     // 2 = classic; 3/4 = polygon mode
 let polyGame = null;     // lazily-created N-player engine (poly.js)
 let polyActive = false;  // when true the poly engine drives update/render
+let online = null;       // { role:'host'|'guest', handle, remote, guestTarget, prevCd } when in an online match
+let onlineSnap = null;   // latest state snapshot received by the guest
 // Assets handed to the polygon engine once the models finish loading.
 let glbWallMat = null, glbFloorMat = null, gunModelSrc = null;
 let now = 0;                    // monotonic game time (seconds)
@@ -352,7 +355,7 @@ document.querySelector('[data-play]').addEventListener('click', () => startGame(
 document.getElementById('fsCorner').addEventListener('click', toggleFullscreen);
 document.querySelector('[data-fsmenu]').addEventListener('click', toggleFullscreen);
 document.querySelector('[data-rematch]').addEventListener('click', () => restartMatch());
-document.querySelector('[data-menu]').addEventListener('click', () => returnToMenu());
+document.querySelector('[data-menu]').addEventListener('click', () => { if (online) leaveOnline(); else returnToMenu(); });
 
 // ---------------------------------------------------------------------------
 // Settings (volumes, cursor sensitivity, keybinds) — persisted to localStorage
@@ -429,10 +432,174 @@ function closeSettings() { settingsOpen = false; elSettings.classList.add('hidde
 document.getElementById('settingsMenuBtn').addEventListener('click', openSettings);
 document.getElementById('closeSettings').addEventListener('click', closeSettings);
 
-// In-battle home button → back to the menu (works for both modes).
+// In-battle home button → back to the menu (works for all modes).
 document.getElementById('homeBtn').addEventListener('click', () => {
-  if (polyActive) { if (polyGame) polyGame.goHome(); }
+  if (online) leaveOnline();
+  else if (polyActive) { if (polyGame) polyGame.goHome(); }
   else returnToMenu();
+});
+
+// ---------------------------------------------------------------------------
+// Online 1v1 (peer-to-peer via net.js). Host-authoritative: the host runs the
+// physics and streams state; the guest sends paddle input and renders its own
+// (P2) view. Power-ups are off in online play. Each side sees only its own view.
+// ---------------------------------------------------------------------------
+let onlineHandle = null;
+const elOnlineModal = document.getElementById('onlineModal');
+const elOnCode = document.querySelector('[data-oncode]');
+const elOnStatus = document.querySelector('[data-onstatus]');
+const elOnInputWrap = document.querySelector('[data-oninputwrap]');
+const elOnTitle = document.querySelector('[data-ontitle]');
+const joinCodeInput = document.getElementById('joinCode');
+
+function setOnlineStatus(t) { if (elOnStatus) elOnStatus.textContent = t || ' '; }
+function openOnlineModal(mode) {
+  settingsOpen = true; // suppress game-start keys while the modal is open
+  elOnlineModal.classList.remove('hidden');
+  elOnCode.textContent = ''; setOnlineStatus('');
+  if (mode === 'host') { elOnTitle.textContent = 'HOSTING'; elOnInputWrap.style.display = 'none'; }
+  else { elOnTitle.textContent = 'JOIN GAME'; elOnInputWrap.style.display = 'flex'; joinCodeInput.value = ''; setTimeout(() => joinCodeInput.focus(), 60); }
+}
+function closeOnlineModal() { settingsOpen = false; elOnlineModal.classList.add('hidden'); }
+
+function netAvailable() { return typeof Peer !== 'undefined'; }
+
+function doHost() {
+  if (!ready) return;
+  openOnlineModal('host');
+  if (!netAvailable()) { setOnlineStatus('Networking unavailable (offline?)'); return; }
+  setOnlineStatus('Creating room…');
+  onlineHandle = hostGame({
+    onCode: (code) => { elOnCode.textContent = code; setOnlineStatus('Share this code · waiting for opponent…'); },
+    onConnected: () => { setOnlineStatus('Connected!'); beginOnline('host'); },
+    onData: (d) => { if (online && online.role === 'host' && d && d.k === 'i') {
+      online.remote.x = THREE.MathUtils.clamp(d.x, bounds.minX + P2.half.x, bounds.maxX - P2.half.x);
+      online.remote.y = THREE.MathUtils.clamp(d.y, bounds.minY + P2.half.y, bounds.maxY - P2.half.y);
+    } },
+    onClose: () => onOpponentLeft(),
+    onError: (e) => setOnlineStatus('Error: ' + ((e && e.type) || 'connection failed')),
+  });
+}
+function doJoin() {
+  if (!ready) return;
+  openOnlineModal('join');
+  if (!netAvailable()) setOnlineStatus('Networking unavailable (offline?)');
+}
+function doJoinConnect() {
+  if (!netAvailable()) { setOnlineStatus('Networking unavailable'); return; }
+  const code = (joinCodeInput.value || '').trim().toUpperCase();
+  if (code.length < 3) { setOnlineStatus('Enter the code'); return; }
+  setOnlineStatus('Connecting…');
+  onlineHandle = joinGame(code, {
+    onConnected: () => { setOnlineStatus('Connected!'); beginOnline('guest'); },
+    onData: (d) => { if (d && d.k === 's') onlineSnap = d; },
+    onClose: () => onOpponentLeft(),
+    onError: (e) => setOnlineStatus('Not found / error: ' + ((e && e.type) || 'failed')),
+  });
+}
+function onOpponentLeft() {
+  if (!online) { setOnlineStatus('Opponent disconnected'); return; }
+  showToast('OPPONENT LEFT', 0xff6b6b);
+  leaveOnline();
+}
+function leaveOnline() {
+  if (onlineHandle) { try { onlineHandle.close(); } catch (e) { /* */ } onlineHandle = null; }
+  online = null; onlineSnap = null;
+  document.body.classList.remove('online', 'guest');
+  returnToMenu();
+}
+
+function beginOnline(role) {
+  online = { role, handle: onlineHandle, remote: null, guestTarget: null, prevCd: 0 };
+  closeOnlineModal();
+  elStart.classList.add('hidden');
+  document.body.classList.remove('pregame', 'solo');
+  document.body.classList.add('online');
+  document.body.classList.toggle('guest', role === 'guest');
+  started = true; botEnabled = false; matchOver = false; viewMode = 'third';
+  score1 = 0; score2 = 0; updateScore();
+  resetPlayState();
+  const p2name = document.querySelector('[data-p2name]');
+  if (p2name) p2name.textContent = role === 'host' ? 'OPPONENT' : 'PLAYER 2';
+  const mid = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2 };
+  Audio.unlock(); Audio.startMusic('game');
+  if (role === 'host') { online.remote = { x: mid.x, y: mid.y }; countdown = 3; showCount('3'); }
+  else { online.guestTarget = { x: mid.x, y: mid.y }; }
+  frameCameras();
+}
+
+// ---- Rendering + per-frame online logic ----
+function renderSingle(cam) {
+  const w = window.innerWidth, h = window.innerHeight, a = w / h;
+  cam.aspect = a; cam.fov = fovForAspect(a); cam.updateProjectionMatrix();
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, w, h);
+  renderer.render(scene, cam);
+}
+function sendSnapshot() {
+  if (!online || online.role !== 'host' || !online.handle) return;
+  const b = balls.find((x) => x.active);
+  online.handle.send({
+    k: 's',
+    p1: [P1.obj.position.x, P1.obj.position.y],
+    p2: [P2.obj.position.x, P2.obj.position.y],
+    b: b ? [b.mesh.position.x, b.mesh.position.y, b.mesh.position.z] : null,
+    s1: score1, s2: score2,
+    cd: countdown > 0 ? Math.ceil(countdown) : (goUntil && now < goUntil ? -1 : 0),
+    over: matchOver ? (score1 >= WIN_SCORE ? 1 : 2) : 0,
+  });
+}
+function setGuestTargetFromClient(cx, cy) {
+  if (!online || online.role !== 'guest' || !bounds) return;
+  online.guestTarget = mapTouchToBounds(cx / window.innerWidth, cy / window.innerHeight, -1);
+}
+window.addEventListener('mousemove', (e) => { if (online && online.role === 'guest') setGuestTargetFromClient(e.clientX, e.clientY); });
+function handleGuestPointerTouch(e) {
+  if (!online || online.role !== 'guest') return;
+  e.preventDefault();
+  const t = e.touches[0];
+  if (t) setGuestTargetFromClient(t.clientX, t.clientY);
+}
+function updateGuestInput(dt) {
+  if (!online.guestTarget || !bounds) return;
+  const spd = PADDLE_SPEED * dt, g = online.guestTarget;
+  if (keys.has(binds.p2Left)) g.x += spd;   // mirrored to match the P2 view
+  if (keys.has(binds.p2Right)) g.x -= spd;
+  if (keys.has(binds.p2Up)) g.y += spd;
+  if (keys.has(binds.p2Down)) g.y -= spd;
+  g.x = THREE.MathUtils.clamp(g.x, bounds.minX + P2.half.x, bounds.maxX - P2.half.x);
+  g.y = THREE.MathUtils.clamp(g.y, bounds.minY + P2.half.y, bounds.maxY - P2.half.y);
+}
+function guestTick(dt) {
+  updateGuestInput(dt);
+  if (online.handle) online.handle.send({ k: 'i', x: online.guestTarget.x, y: online.guestTarget.y });
+  if (onlineSnap) applyOnlineSnapshot(onlineSnap);
+}
+function applyOnlineSnapshot(s) {
+  if (!P1 || !P2) return;
+  P1.obj.position.set(s.p1[0], s.p1[1], paddle1Z);
+  P2.obj.position.set(s.p2[0], s.p2[1], paddle2Z);
+  const b = balls[0];
+  if (s.b) { b.active = true; b.mesh.visible = true; b.mesh.position.set(s.b[0], s.b[1], s.b[2]); }
+  else { b.active = false; b.mesh.visible = false; }
+  for (let i = 1; i < balls.length; i++) { balls[i].active = false; balls[i].mesh.visible = false; }
+  if (s.s1 !== score1 || s.s2 !== score2) { score1 = s.s1; score2 = s.s2; updateScore(); Audio.play('score'); }
+  const cd = s.cd;
+  if (cd > 0 && online.prevCd !== cd) showCount(String(cd));
+  else if (cd === -1 && online.prevCd !== -1) showCount('GO!');
+  else if (cd === 0 && (online.prevCd === -1 || online.prevCd > 0)) elCount.style.display = 'none';
+  online.prevCd = cd;
+  if (s.over && !matchOver) { matchOver = true; endMatch(); }
+  else if (!s.over && matchOver) { matchOver = false; elBanner.classList.remove('show'); Confetti.stop(); Audio.startMusic('game'); }
+}
+
+document.getElementById('hostBtn').addEventListener('click', doHost);
+document.getElementById('joinBtn').addEventListener('click', doJoin);
+document.getElementById('joinGo').addEventListener('click', doJoinConnect);
+joinCodeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.stopPropagation(); doJoinConnect(); } });
+document.getElementById('onlineCancel').addEventListener('click', () => {
+  if (onlineHandle) { try { onlineHandle.close(); } catch (e) { /* */ } onlineHandle = null; }
+  closeOnlineModal();
 });
 
 function toggleFullscreen() {
@@ -502,6 +669,7 @@ function mapTouchToBounds(nx, ny, side) {
   return { x: bx, y: by };
 }
 function handleClassicTouch(e) {
+  if (online) { handleGuestPointerTouch(e); return; } // online guest handled separately
   if (polyActive || !bounds || !started || matchOver) return;
   e.preventDefault();
   p1Touch = null; p2Touch = null;
@@ -806,15 +974,19 @@ function update(dt) {
   if (goUntil && now > goUntil) { elCount.style.display = 'none'; goUntil = 0; }
 
   updatePaddles(dt);
-  updateFire(dt);
-  updateEffects();
-  updateArenaSpin(dt);
+  if (!online) {          // power-ups / shotgun / hail are disabled in online 1v1
+    updateFire(dt);
+    updateEffects();
+    updateArenaSpin(dt);
+  }
   updateBalls(dt);
-  updateBullets(dt);
-  updateHail(dt);
-  updatePowerups(dt);
+  if (!online) {
+    updateBullets(dt);
+    updateHail(dt);
+    updatePowerups(dt);
+  }
   updateBursts(dt);
-  updateVines();
+  if (!online) updateVines();
   updateHudFx();
 }
 
@@ -844,8 +1016,11 @@ function updatePaddles(dt) {
   P1.obj.position.x += p1x * s1;
   P1.obj.position.y += p1y * s1;
 
-  // P2: bot AI, or bound keys + right stick (X inverted — cam2 faces the other way)
-  if (botEnabled) {
+  // P2: online remote input, bot AI, or bound keys + right stick (X inverted).
+  if (online && online.role === 'host') {
+    P2.obj.position.x = online.remote.x;
+    P2.obj.position.y = online.remote.y;
+  } else if (botEnabled) {
     botMove(dt);
   } else {
     let p2x = 0, p2y = 0;
@@ -1423,6 +1598,16 @@ function animate() {
     : (started && !matchOver);
   document.body.classList.toggle('inbattle', inBattle);
   if (polyActive && polyGame) { polyGame.update(dt); polyGame.render(); return; }
+  if (online) {
+    if (ready) {
+      if (online.role === 'host') { update(dt); sendSnapshot(); }
+      else { guestTick(dt); }
+      positionCameras();
+    }
+    if (toastTimer && now > toastTimer) { elToast.classList.remove('show'); toastTimer = 0; }
+    renderSingle(online.role === 'host' ? cam1 : cam2);
+    return;
+  }
   if (ready) pollPad();
   update(dt);
   updateGuns(dt);
