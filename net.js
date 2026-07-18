@@ -16,6 +16,21 @@ export function randomCode(len = 4) {
   return s;
 }
 
+// ICE servers: STUN for direct hole-punching, plus free public TURN relays so
+// peers on strict/different networks (cellular, corporate/school Wi-Fi) can
+// still connect by bouncing data through the relay. Both peers use these.
+const PEER_OPTS = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    ],
+  },
+};
+
 function log(...a) { try { console.log('[net]', ...a); } catch (e) { /* */ } }
 
 function wireData(conn, h) {
@@ -33,7 +48,7 @@ export function hostGame(h) {
 
   function attempt(tries) {
     const code = randomCode();
-    const peer = new Peer(PREFIX + code);
+    const peer = new Peer(PREFIX + code, PEER_OPTS);
     handle.peer = peer; handle.code = code;
     peer.on('open', () => { log('hosting as', code); h.onCode && h.onCode(code); });
     peer.on('connection', (conn) => {
@@ -58,7 +73,7 @@ export function hostGame(h) {
 // registering with the broker (peer-unavailable) when we first try.
 export function joinGame(code, h) {
   const target = PREFIX + (code || '').toUpperCase().trim();
-  const peer = new Peer();
+  const peer = new Peer(undefined, PEER_OPTS);
   const handle = { conn: null, peer, closed: false, done: false,
     send: (o) => { if (handle.conn && handle.conn.open) handle.conn.send(o); },
     close: () => { handle.closed = true; handle.done = true; try { peer.destroy(); } catch (e) { /* */ } } };
