@@ -492,9 +492,12 @@ function doJoinConnect() {
   setOnlineStatus('Connecting…');
   onlineHandle = joinGame(code, {
     onConnected: () => { setOnlineStatus('Connected!'); beginOnline('guest'); },
+    onRetry: (n) => setOnlineStatus(`Looking for host… (try ${n}) — keep the host on the Host screen`),
     onData: (d) => { if (d && d.k === 's') onlineSnap = d; },
     onClose: () => onOpponentLeft(),
-    onError: (e) => setOnlineStatus('Not found / error: ' + ((e && e.type) || 'failed')),
+    onError: (e) => setOnlineStatus(e && e.type === 'not-found'
+      ? 'No host with that code. Check the code and that they clicked HOST.'
+      : 'Connection error: ' + ((e && e.type) || 'failed')),
   });
 }
 function onOpponentLeft() {

@@ -16,31 +16,37 @@ export function randomCode(len = 4) {
   return s;
 }
 
-function wire(conn, h) {
-  conn.on('open', () => h.onConnected && h.onConnected(conn));
+function log(...a) { try { console.log('[net]', ...a); } catch (e) { /* */ } }
+
+function wireData(conn, h) {
   conn.on('data', (d) => h.onData && h.onData(d));
-  conn.on('close', () => h.onClose && h.onClose());
-  conn.on('error', (e) => h.onError && h.onError(e));
+  conn.on('close', () => { log('conn closed'); h.onClose && h.onClose(); });
+  conn.on('error', (e) => log('conn error', e && e.type, e));
 }
 
 // Host a room. Calls h.onCode(code) once the room is registered, then
-// h.onConnected() when a guest joins. Returns { send, close, code }.
+// h.onConnected() when a guest joins. Returns { send, close }.
 export function hostGame(h) {
-  const handle = { conn: null, peer: null, code: null,
+  const handle = { conn: null, peer: null, code: null, closed: false,
     send: (o) => { if (handle.conn && handle.conn.open) handle.conn.send(o); },
-    close: () => { try { handle.peer && handle.peer.destroy(); } catch (e) { /* */ } } };
+    close: () => { handle.closed = true; try { handle.peer && handle.peer.destroy(); } catch (e) { /* */ } } };
 
   function attempt(tries) {
     const code = randomCode();
     const peer = new Peer(PREFIX + code);
     handle.peer = peer; handle.code = code;
-    peer.on('open', () => h.onCode && h.onCode(code));
+    peer.on('open', () => { log('hosting as', code); h.onCode && h.onCode(code); });
     peer.on('connection', (conn) => {
+      log('guest connecting…');
       handle.conn = conn;
-      wire(conn, h);
+      conn.on('open', () => { log('guest connected'); h.onConnected && h.onConnected(conn); });
+      wireData(conn, h);
     });
+    peer.on('disconnected', () => { if (!handle.closed) { log('host broker dropped — reconnecting'); try { peer.reconnect(); } catch (e) { /* */ } } });
     peer.on('error', (e) => {
+      log('host peer error', e && e.type);
       if (e && e.type === 'unavailable-id' && tries < 6) { try { peer.destroy(); } catch (er) { /* */ } attempt(tries + 1); }
+      else if (e && (e.type === 'network' || e.type === 'disconnected')) { /* transient — reconnect handles it */ }
       else h.onError && h.onError(e);
     });
   }
@@ -48,17 +54,43 @@ export function hostGame(h) {
   return handle;
 }
 
-// Join a room by code. Calls h.onConnected() when the channel opens.
+// Join a room by code. Retries a few times because the host may still be
+// registering with the broker (peer-unavailable) when we first try.
 export function joinGame(code, h) {
+  const target = PREFIX + (code || '').toUpperCase().trim();
   const peer = new Peer();
-  const handle = { conn: null, peer,
+  const handle = { conn: null, peer, closed: false, done: false,
     send: (o) => { if (handle.conn && handle.conn.open) handle.conn.send(o); },
-    close: () => { try { peer.destroy(); } catch (e) { /* */ } } };
-  peer.on('open', () => {
-    const conn = peer.connect(PREFIX + code.toUpperCase().trim(), { reliable: true });
+    close: () => { handle.closed = true; handle.done = true; try { peer.destroy(); } catch (e) { /* */ } } };
+
+  let tries = 0;
+  const MAX_TRIES = 8;
+  function tryConnect() {
+    if (handle.done || handle.closed) return;
+    tries++;
+    log('connecting to', target, 'attempt', tries);
+    if (h.onRetry && tries > 1) h.onRetry(tries);
+    const conn = peer.connect(target, { reliable: true });
     handle.conn = conn;
-    wire(conn, h);
+    let opened = false;
+    conn.on('open', () => { opened = true; handle.done = true; log('connected'); h.onConnected && h.onConnected(conn); });
+    wireData(conn, h);
+    // If this attempt doesn't open, try again (host might not be up yet).
+    setTimeout(() => { if (!opened && !handle.done && tries < MAX_TRIES) tryConnect(); }, 2600);
+  }
+
+  peer.on('open', () => { log('guest peer ready'); tries = 0; tryConnect(); });
+  peer.on('disconnected', () => { if (!handle.closed) { try { peer.reconnect(); } catch (e) { /* */ } } });
+  peer.on('error', (e) => {
+    log('guest peer error', e && e.type);
+    if (e && e.type === 'peer-unavailable') {
+      if (tries < MAX_TRIES && !handle.done) { setTimeout(tryConnect, 1500); }
+      else if (!handle.done) h.onError && h.onError({ type: 'not-found' });
+    } else if (e && (e.type === 'network' || e.type === 'disconnected')) {
+      /* transient — reconnect handles it */
+    } else if (!handle.done) {
+      h.onError && h.onError(e);
+    }
   });
-  peer.on('error', (e) => h.onError && h.onError(e));
   return handle;
 }
