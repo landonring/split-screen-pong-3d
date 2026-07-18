@@ -20,6 +20,7 @@ A fast, flashy 3D take on Pong for **2–4 players**, built with [Three.js](http
 | **Player 3 / 4** | Gamepads (left stick) | R2 |
 
 - **C / △** switch camera view · **F** fullscreen · **M** mute
+- **Phone / tablet:** drag to move your paddle, with on-screen buttons to shoot and switch camera view.
 - All keybinds, per-channel volumes (music / ball / gunshots) and cursor sensitivity are editable in **⚙ Settings**.
 - Controller users get a joystick-driven reticle cursor for the menus.
 
