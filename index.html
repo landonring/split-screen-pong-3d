@@ -277,6 +277,13 @@
   #polyhud .pcard .pn { font-size: 11px; font-weight: 800; letter-spacing: 2px; }
   #polyhud .pcard .ph { font-size: 20px; line-height: 1.1; margin-top: 2px; text-shadow: 0 0 12px currentColor; }
   #polyhud .pcard .pfx { font-size: 10px; font-weight: 700; letter-spacing: 1px; opacity: .8; margin-top: 3px; }
+  #polyhud .pcard .pyou { font-size: 10px; font-weight: 800; letter-spacing: 2px; color: #ffd23f; margin-top: 2px; }
+  /* Remote players (other devices): scores only — you never see their view. */
+  #polyhud .premote { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 8px; align-items: flex-end; }
+  #polyhud .premote .pcard { min-width: 88px; padding: 6px 12px; background: rgba(8,13,26,.62); }
+  #polyhud .premote .pcard .ph { font-size: 16px; }
+  #polyhud .premote .rlabel { align-self: center; font-size: 10px; letter-spacing: 2px; opacity: .45; margin-right: 2px; }
   #polyhud .pcount { position: absolute; top: 44%; left: 50%; transform: translate(-50%,-50%);
     font-size: clamp(60px, 12vw, 150px); font-weight: 900; letter-spacing: 4px; display: none;
     text-shadow: 0 0 50px rgba(88,208,255,.7); z-index: 9; }
@@ -359,6 +366,18 @@
   }
   #settings .bindkey:hover { background: rgba(88,208,255,.18); }
   #settings .bindkey.capturing { background: rgba(255,210,90,.25); border-color: #ffd23f; color: #ffd23f; }
+  #settings .bindkey.on { background: rgba(53,224,74,.25); border-color: rgba(53,224,74,.6); color: #7dffa0; }
+  #settings .bindkey[hidden] { display: none; }
+  #settings .sethint { font-size: 11px; line-height: 1.6; letter-spacing: 1px; opacity: .55; max-width: 420px; }
+  #settings .sethint.warn { color: #ffb14a; opacity: .9; }
+
+  /* Head-tracking webcam preview (also shows the tracker's lock-on box) */
+  #headcam {
+    position: fixed; left: 14px; bottom: 14px; z-index: 45; width: 148px; border-radius: 12px;
+    border: 1px solid rgba(120,180,255,.35); background: #05060a; display: none;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5); transform: scaleX(-1); /* mirror = natural */
+  }
+  body.headcam #headcam { display: block; }
   #settings #resetBinds {
     align-self: flex-start; margin-top: 10px; cursor: pointer; font-family: inherit;
     font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #eaf2ff;
@@ -375,6 +394,83 @@
     background: rgba(255,255,255,.07); border: 1px solid rgba(120,180,255,.28);
   }
   #start .menubar button:hover { background: rgba(88,208,255,.18); }
+  #start .menubar .onlinebtn { background: rgba(88,208,255,.14); border-color: rgba(88,208,255,.45); }
+
+  /* ---- Online lobby (invite codes) ---- */
+  #onlineModal {
+    position: fixed; inset: 0; z-index: 62; display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif; color: #eaf2ff;
+    background: radial-gradient(circle at 50% 40%, rgba(20,30,55,.7), rgba(2,4,10,.92) 75%);
+    backdrop-filter: blur(6px); transition: opacity .25s ease;
+  }
+  #onlineModal.hidden { opacity: 0; pointer-events: none; }
+  #onlineModal .onpanel {
+    width: min(480px, 94vw); max-height: 92vh; overflow-y: auto;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    padding: 26px 30px; border-radius: 20px;
+    background: rgba(10,15,28,.92); border: 1px solid rgba(120,180,255,.3);
+    box-shadow: 0 20px 60px rgba(0,0,0,.5); text-align: center;
+  }
+  #onlineModal .ontitle {
+    font-size: 20px; font-weight: 900; letter-spacing: 3px;
+    background: linear-gradient(90deg, #35e04a, #58d0ff); -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  #onlineModal .onbig {
+    font-size: 46px; font-weight: 900; letter-spacing: 10px; padding: 2px 0 0 14px; min-height: 8px;
+    color: #58d0ff; text-shadow: 0 0 24px rgba(88,208,255,.6);
+  }
+  #onlineModal .onstatus { font-size: 13px; letter-spacing: 1px; opacity: .75; min-height: 16px; }
+  #onlineModal .onhint { font-size: 11px; letter-spacing: 1px; opacity: .5; max-width: 380px; line-height: 1.6; }
+  #onlineModal .onrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  #onlineModal [hidden] { display: none !important; }
+  #onlineModal input {
+    width: 160px; text-align: center; text-transform: uppercase; letter-spacing: 6px;
+    font-family: inherit; font-size: 20px; font-weight: 800; color: #eaf2ff;
+    padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,.08); border: 1px solid rgba(120,180,255,.35);
+  }
+  #onlineModal button {
+    cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 800; letter-spacing: 1px; color: #eaf2ff;
+    padding: 10px 20px; border-radius: 999px; border: 1px solid rgba(120,180,255,.35); background: rgba(88,208,255,.15);
+  }
+  #onlineModal button:hover { background: rgba(88,208,255,.3); }
+  #onlineModal button:disabled { opacity: .35; cursor: default; }
+  #onlineModal button:disabled:hover { background: rgba(88,208,255,.15); }
+  #onlineModal .onghost { background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.2); }
+  #onlineModal .onghost:hover { background: rgba(255,255,255,.15); }
+  #onlineModal .ongo {
+    color: #05060a; border: none; padding: 13px 30px; font-size: 15px; letter-spacing: 2px;
+    background: linear-gradient(90deg, #58d0ff, #4d8dff); box-shadow: 0 0 22px rgba(88,208,255,.45);
+  }
+  #onlineModal .ongo:hover { filter: brightness(1.1); background: linear-gradient(90deg, #58d0ff, #4d8dff); }
+  #onlineModal .ongo:disabled:hover { filter: none; }
+  /* Roster: one line per connected device */
+  #onlineModal .onroster { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+  #onlineModal .ondev {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 8px 14px; border-radius: 12px; font-size: 12px; letter-spacing: 1px;
+    background: rgba(255,255,255,.05); border: 1px solid rgba(120,180,255,.18);
+  }
+  #onlineModal .ondev .ondevname { font-weight: 800; opacity: .85; }
+  #onlineModal .ondev .ondevwho { display: flex; gap: 6px; }
+  #onlineModal .ondev .onpill {
+    font-size: 11px; font-weight: 800; letter-spacing: 1px; padding: 3px 9px; border-radius: 999px;
+    background: rgba(88,208,255,.16); border: 1px solid rgba(88,208,255,.35);
+  }
+  #onlineModal .seatsel { display: flex; align-items: center; gap: 8px; }
+  #onlineModal .seatsel .seatlabel { font-size: 11px; letter-spacing: 2px; opacity: .55; }
+  #onlineModal .seatsel button { padding: 7px 16px; font-size: 12px; }
+  #onlineModal .seatsel button.active { background: rgba(88,208,255,.45); border-color: rgba(88,208,255,.8); }
+
+  /* ---- Online play: you only render your own view(s) ---- */
+  body.online .divider { display: none; }
+  body.online .half { width: 100%; }              /* single full-screen view; both score cards stay */
+  body.online .gunhud { display: none; }          /* power-ups are off in online 1v1 */
+  body.online.guest #banner [data-rematch] { display: none; }
+  body.online #banner [data-waithost] { display: none; }
+  body.online.guest #banner [data-waithost] { display: block; }
+  #banner [data-waithost] { display: none; font-size: 13px; letter-spacing: 2px; opacity: .7; }
+  /* Little "who am I" tag under the score cards */
+  .pcard .youtag { font-size: 10px; font-weight: 800; letter-spacing: 2px; color: #ffd23f; opacity: .9; }
 
   /* ---- Mobile on-screen controls ---- */
   body.mobile #gamecursor { display: none !important; } /* no reticle on touch */
@@ -403,6 +499,8 @@
   }
   /* Solo (vs bot) → only Player 1 shoots. */
   body.solo #mShootR { display: none; }
+  /* Online 1v1 has no power-ups, so there's nothing to shoot with. */
+  body.online #mShootL, body.online #mShootR { display: none; }
   /* Lift the shotgun ammo HUD so it clears the mobile buttons. */
   body.mobile .gunhud { bottom: 126px; }
 </style>
@@ -418,6 +516,9 @@
     <button id="mView" class="mbtn mbtn-view">VIEW</button>
     <button id="mShootR" class="mbtn mbtn-shoot" aria-label="Player 2 shoot">&#128299;</button>
   </div>
+
+  <!-- Head-tracking preview (drawn by headtrack.js when the setting is on) -->
+  <canvas id="headcam" width="160" height="120"></canvas>
 
   <div id="start">
     <div class="menu">
@@ -447,6 +548,8 @@
       <button class="playbtn" data-play>PRESS SPACE TO PLAY</button>
 
       <div class="menubar">
+        <button id="hostBtn" class="onlinebtn">&#127760; PLAY ONLINE</button>
+        <button id="joinBtn" class="onlinebtn">JOIN WITH CODE</button>
         <button id="settingsMenuBtn">&#9881; SETTINGS</button>
         <button id="fsMenuBtn" data-fsmenu>&#9974; FULLSCREEN</button>
       </div>
@@ -462,7 +565,7 @@
     <div class="half half-l">
       <div class="topbar">
         <div class="pcard">
-          <span class="pname">PLAYER 1</span>
+          <span class="pname" data-p1name>PLAYER 1</span>
           <span class="pscore" data-p1>0</span>
         </div>
         <div class="badges" data-p1fx></div>
@@ -505,6 +608,46 @@
         <button id="menuBtn" data-menu>MENU</button>
       </div>
       <div class="sub">press R or &#10005; to rematch &middot; L1/R1 for menu</div>
+      <div class="sub" data-waithost>waiting for the host to start the rematch&hellip;</div>
+    </div>
+  </div>
+
+  <!-- Online lobby: host shows an invite code, guests type it in. -->
+  <div id="onlineModal" class="hidden">
+    <div class="onpanel">
+      <div class="ontitle" data-ontitle>PLAY ONLINE</div>
+
+      <!-- Host: the invite code + share link -->
+      <div data-onhost hidden>
+        <div class="onbig" data-oncode></div>
+        <div class="onrow">
+          <button class="onghost" data-oncopy>COPY INVITE LINK</button>
+        </div>
+      </div>
+
+      <!-- Guest: type the code -->
+      <div class="onrow" data-onjoin hidden>
+        <input id="joinCode" maxlength="6" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <button data-onconnect>CONNECT</button>
+      </div>
+
+      <div class="onstatus" data-onstatus>&nbsp;</div>
+
+      <!-- Everyone: how many people are playing on THIS device -->
+      <div class="seatsel" data-onseats hidden>
+        <span class="seatlabel">PLAYERS ON THIS DEVICE</span>
+        <button data-seats="1">1</button>
+        <button data-seats="2">2</button>
+      </div>
+
+      <div class="onroster" data-onroster></div>
+
+      <div class="onhint" data-onhint></div>
+
+      <div class="onrow">
+        <button class="ongo" data-onstart hidden disabled>START MATCH</button>
+        <button class="onghost" data-oncancel>CANCEL</button>
+      </div>
     </div>
   </div>
 
@@ -521,6 +664,16 @@
         <div class="setsec">CURSOR</div>
         <div class="setrow"><span class="setlabel">Joystick sensitivity</span><input type="range" class="setslider" data-vol="sensitivity" min="0" max="1" step="0.01"><span class="setpct" data-pct="sensitivity"></span></div>
 
+        <div class="setsec">HEAD TRACKING</div>
+        <div class="setrow">
+          <span class="setlabel">Steer with your head</span>
+          <button class="bindkey" data-headtoggle>OFF</button>
+          <button class="bindkey" data-headrecenter hidden>RECENTER</button>
+        </div>
+        <div class="setrow"><span class="setlabel">Head sensitivity</span><input type="range" class="setslider" data-vol="headSens" min="0" max="1" step="0.01"><span class="setpct" data-pct="headSens"></span></div>
+        <div class="setrow"><span class="setlabel">Mirror left/right</span><button class="bindkey" data-headmirror>ON</button></div>
+        <div class="sethint" data-headstatus>Uses your webcam to move Player 1's paddle &mdash; lean left/right and up/down and the ball follows your head. Video never leaves this device.</div>
+
         <div class="setsec">KEYBINDS</div>
         <div id="setbinds"></div>
         <button id="resetBinds">RESET KEYBINDS</button>
@@ -529,6 +682,7 @@
     </div>
   </div>
 
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script type="importmap">
   {
     "imports": {

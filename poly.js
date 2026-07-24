@@ -8,16 +8,21 @@
 // walls and the paddles. Miss your edge and you lose a life; hit 0 lives and
 // your edge is walled off and you're out. Last player standing wins.
 //
-// Controls: P1 = mouse cursor, P2 = arrow keys, P3/P4 = gamepads.
+// Controls, per device, by seat: seat 1 = mouse (or head tracking), seat 2 =
+// arrow keys, seats 3/4 = gamepads. Touch drag works in any seat's viewport.
 //
-// Rendered as an N-way split screen (2×2 grid; for 3P the 4th cell is a
-// top-down overview). Runs in its own THREE.Scene, sharing the caller's
-// renderer/canvas. main.js hands control here when the player count is > 2.
+// Rendered as a split screen over the players sitting at THIS device — one
+// full-screen view if you're alone, side-by-side if two of you share a
+// keyboard. In an online match the rest of the players live on other devices:
+// the host simulates and streams the world, everyone predicts their own
+// paddle, and you only ever see your own view of the arena (plus everyone's
+// score). Runs in its own THREE.Scene, sharing the caller's renderer/canvas.
 // ===========================================================================
 import * as THREE from 'three';
 import * as Audio from './audio.js';
 import * as Confetti from './confetti.js';
 import { binds } from './binds.js';
+import { head } from './headtrack.js';
 
 const PLAYER_COLORS = [0x35e04a, 0x4d8dff, 0xff7a3c, 0xb96bff];
 const PLAYER_NAMES = ['PLAYER 1', 'PLAYER 2', 'PLAYER 3', 'PLAYER 4'];
@@ -155,9 +160,33 @@ export function createPolyGame(renderer, opts = {}) {
   const bursts = [];
   let floorMesh = null, ceilMesh = null;
 
+  // ---- Networking (invite-code play across devices) -----------------------
+  // Host runs the physics and streams snapshots; every device renders only the
+  // views of the players sitting at it — everyone else is scores on the HUD.
+  // `net` = { role:'host'|'guest', locals:[playerIndex…], send(msg) }.
+  let net = null;
+  let snapTimer = 0;                 // host: seconds until the next snapshot
+  const SNAP_DT = 1 / 30;            // 30 snapshots/sec
+  let puNextId = 1;                  // host: power-up ids so guests can match them
+  let lastWinner = null;
+  let netCd = 0, netSpin = 0;        // guest: last countdown / arena-spin we were told
+  const isGuest = () => !!net && net.role === 'guest';
+  // Local "seat" of a player on THIS device: 0 = first seat, -1 = another device.
+  function seatOf(p) { return net ? net.locals.indexOf(p.index) : p.index; }
+  function seatCount() { return net ? net.locals.length : N; }
+  function localPlayers() {
+    const idx = net ? net.locals : players.map((p) => p.index);
+    return idx.map((i) => players[i]).filter(Boolean);
+  }
+  function netSend(msg) { if (net && net.send) net.send(msg); }
+  function netEmit(msg) { if (net && net.role === 'host') net.send(msg); }
+  // Sound effects run on the host and are mirrored to the guests, so everyone
+  // hears the same hit/score/pop even though only the host simulates it.
+  function sfx(name) { Audio.play(name); netEmit({ k: 'e', e: 'a', n: name }); }
+
   // ---- Input -------------------------------------------------------------
   const keys = new Set();
-  let mouseX = 0.5, mouseY = 0.5; // normalised within P1's viewport
+  let mouseX = 0.5, mouseY = 0.5; // normalised within seat 0's viewport
   const firePrev = [false, false, false, false];
   const padEdge = {};
 
@@ -165,40 +194,38 @@ export function createPolyGame(renderer, opts = {}) {
     const k = e.key.toLowerCase();
     keys.add(k);
     if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
-    if (k === binds.rematch && matchOver) restart();
+    if (k === binds.rematch && matchOver && !isGuest()) restart();
     if (k === binds.mute) Audio.toggleMuted();
   }
   function onKeyUp(e) { keys.delete(e.key.toLowerCase()); }
-  function p1CssRect() {
-    // P1's viewport in CSS px (top-left origin): left column (3P) or top-left
-    // quadrant (4P).
-    const w = window.innerWidth, h = window.innerHeight;
-    if (N === 3) return { l: 0, t: 0, w: w / 3, h };
-    return { l: 0, t: 0, w: w / 2, h: h / 2 };
+
+  // Viewport of a local seat in CSS px (top-left origin) — mirrors seatRects().
+  function cssRectForSeat(slot) {
+    const w = window.innerWidth, h = window.innerHeight, n = seatCount();
+    if (slot < 0) return null;
+    if (n <= 1) return { l: 0, t: 0, w, h };
+    if (n === 2) return { l: slot * (w / 2), t: 0, w: w / 2, h };
+    if (n === 3) return { l: slot * (w / 3), t: 0, w: w / 3, h };
+    const hw = w / 2, hh = h / 2;
+    const cells = [{ l: 0, t: 0 }, { l: hw, t: 0 }, { l: 0, t: hh }, { l: hw, t: hh }];
+    return { l: cells[slot].l, t: cells[slot].t, w: hw, h: hh };
   }
   function onMouseMove(e) {
-    const r = p1CssRect();
+    const r = cssRectForSeat(0);
+    if (!r) return;
     mouseX = THREE.MathUtils.clamp((e.clientX - r.l) / r.w, 0, 1);
     mouseY = THREE.MathUtils.clamp((e.clientY - r.t) / r.h, 0, 1);
   }
 
-  // Each player's viewport in CSS px (top-left origin), matching playerRects().
-  function cssRectForPlayer(i) {
-    const w = window.innerWidth, h = window.innerHeight;
-    if (N === 3) return { l: i * (w / 3), t: 0, w: w / 3, h };
-    const hw = w / 2, hh = h / 2;
-    const cells = [{ l: 0, t: 0 }, { l: hw, t: 0 }, { l: 0, t: hh }, { l: hw, t: hh }];
-    return { l: cells[i].l, t: cells[i].t, w: hw, h: hh };
-  }
-  // Touch drag: a touch in a player's viewport controls that player's paddle.
+  // Touch drag: a touch inside a seat's viewport controls that seat's paddle.
   function onTouch(e) {
     e.preventDefault();
     for (const p of players) p.touch = null;
     for (const t of e.touches) {
-      for (const p of players) {
+      for (const p of localPlayers()) {
         if (!p.alive) continue;
-        const r = cssRectForPlayer(p.index);
-        if (t.clientX >= r.l && t.clientX < r.l + r.w && t.clientY >= r.t && t.clientY < r.t + r.h) {
+        const r = cssRectForSeat(seatOf(p));
+        if (r && t.clientX >= r.l && t.clientX < r.l + r.w && t.clientY >= r.t && t.clientY < r.t + r.h) {
           p.touch = { tx: (t.clientX - r.l) / r.w, ty: (t.clientY - r.t) / r.h };
           break;
         }
@@ -206,16 +233,16 @@ export function createPolyGame(renderer, opts = {}) {
     }
   }
 
-  // ---- Gamepads: assign connected pads to P3, P4 in connection order -----
+  // ---- Gamepads: assign connected pads to seats 3+ in connection order ----
   function connectedPads() {
     const list = navigator.getGamepads ? navigator.getGamepads() : [];
     const out = [];
     for (let i = 0; i < list.length; i++) if (list[i]) out.push(list[i]);
     return out;
   }
-  function padForPlayer(i) { // i is 0-based; P3 -> pads[0], P4 -> pads[1]
+  function padForSeat(slot) { // seat 2 -> pads[0], seat 3 -> pads[1]
     const pads = connectedPads();
-    return pads[i - 2] || null;
+    return pads[slot - 2] || null;
   }
   function axis(pad, i) { const v = pad ? (pad.axes[i] || 0) : 0; return Math.abs(v) < 0.18 ? 0 : v; }
   function padBtn(pad, i) { return !!(pad && pad.buttons[i] && pad.buttons[i].pressed); }
@@ -433,6 +460,7 @@ export function createPolyGame(renderer, opts = {}) {
     return { pts, vels: Array.from({ length: BURST_N }, () => new THREE.Vector3()), life: 0 };
   }
   function spawnBurst(pos, color) {
+    netEmit({ k: 'e', e: 'b', x: +pos.x.toFixed(2), y: +pos.y.toFixed(2), z: +pos.z.toFixed(2), c: color });
     const b = bursts.find((x) => x.life <= 0) || bursts[0];
     b.life = BURST_TIME; b.pts.visible = true;
     b.pts.material.color.setHex(color); b.pts.material.opacity = 1;
@@ -488,20 +516,38 @@ export function createPolyGame(renderer, opts = {}) {
       const hMin = p.halfH, hMax = PLAY_H - p.halfH;
       const slow = p.slowUntil > now ? VINE_SLOW : 1;
       const spd = PADDLE_SPEED * dt * slow;
+      const slot = seatOf(p);
 
-      if (p.touch) {
-        // Touch drag: absolute position within the player's viewport.
+      if (slot < 0) {
+        // Someone on another device owns this paddle.
+        if (isGuest()) {
+          // Streamed position — ease in so 30 Hz snapshots look smooth.
+          if (p.netC != null) {
+            p.c = THREE.MathUtils.damp(p.c, p.netC, 18, dt);
+            p.h = THREE.MathUtils.damp(p.h, p.netH, 18, dt);
+          }
+        } else if (p.netC != null) {
+          p.c = p.netC; p.h = p.netH;   // host: last input we got from them
+        }
+      } else if (p.touch) {
+        // Touch drag: absolute position within the seat's viewport.
         let tx = p.touch.tx, ty = p.touch.ty;
         if (p.screenRightSign < 0) tx = 1 - tx;
         p.c = THREE.MathUtils.lerp(cMin, cMax, tx);
         p.h = THREE.MathUtils.lerp(hMax, hMin, ty);
-      } else if (p.index === 0) {
-        // Mouse: absolute position within P1's viewport.
+      } else if (slot === 0 && head.active) {
+        // Head tracking: your head's position in the webcam frame.
+        let tx = head.nx, ty = head.ny;
+        if (p.screenRightSign < 0) tx = 1 - tx;
+        p.c = THREE.MathUtils.lerp(cMin, cMax, tx);
+        p.h = THREE.MathUtils.lerp(hMax, hMin, ty);
+      } else if (slot === 0) {
+        // Mouse: absolute position within seat 0's viewport.
         let tx = mouseX, ty = mouseY;
         if (p.screenRightSign < 0) tx = 1 - tx;
         p.c = THREE.MathUtils.lerp(cMin, cMax, tx);
         p.h = THREE.MathUtils.lerp(hMax, hMin, ty); // screen-top -> high
-      } else if (p.index === 1) {
+      } else if (slot === 1) {
         // Arrow keys.
         let dx = 0, dy = 0;
         if (keys.has(binds.p2Right)) dx += 1;
@@ -512,7 +558,7 @@ export function createPolyGame(renderer, opts = {}) {
         p.h += dy * spd;
       } else {
         // Gamepad.
-        const pad = padForPlayer(p.index);
+        const pad = padForSeat(slot);
         const sx = axis(pad, 0), sy = axis(pad, 1);
         p.c += sx * p.screenRightSign * spd;
         p.h += -sy * spd;
@@ -524,6 +570,22 @@ export function createPolyGame(renderer, opts = {}) {
       p.prevC = p.c; p.prevH = p.h;
     }
     updatePaddleTransforms();
+    if (isGuest()) sendGuestInput();
+  }
+
+  // Guests stream their own paddle positions (predicted locally, so they feel
+  // instant) plus a shoot flag; the host is still the one that fires the gun.
+  function sendGuestInput() {
+    const out = [];
+    for (const p of localPlayers()) {
+      const slot = seatOf(p);
+      let fire;
+      if (slot === 0) fire = keys.has(binds.p1Shoot);
+      else if (slot === 1) fire = keys.has(binds.p2Shoot);
+      else { const pad = padForSeat(slot); fire = padBtn(pad, 7) || padBtn(pad, 0); }
+      out.push([p.index, +p.c.toFixed(2), +p.h.toFixed(2), fire ? 1 : 0]);
+    }
+    if (out.length) netSend({ k: 'in', p: out });
   }
 
   // =========================================================================
@@ -603,8 +665,8 @@ export function createPolyGame(renderer, opts = {}) {
       const r = b.radius;
 
       // Floor + ceiling.
-      if (pos.y - r < 0) { pos.y = r; b.vel.y = Math.abs(b.vel.y); Audio.play('bounce'); }
-      if (pos.y + r > PLAY_H) { pos.y = PLAY_H - r; b.vel.y = -Math.abs(b.vel.y); Audio.play('bounce'); }
+      if (pos.y - r < 0) { pos.y = r; b.vel.y = Math.abs(b.vel.y); sfx('bounce'); }
+      if (pos.y + r > PLAY_H) { pos.y = PLAY_H - r; b.vel.y = -Math.abs(b.vel.y); sfx('bounce'); }
 
       // Edges: find the most-penetrated edge the ball is exiting through.
       let hitEdge = null, hitDist = -Infinity, hitS = 0;
@@ -644,7 +706,7 @@ export function createPolyGame(renderer, opts = {}) {
   function resolveEdge(b, e, dist, s) {
     const owner = players[e.owner];
     // Walled-off (eliminated) edge → plain bounce.
-    if (e.wall || !owner.alive) { reflectAndPush(b, e, dist); Audio.play('wall'); return; }
+    if (e.wall || !owner.alive) { reflectAndPush(b, e, dist); sfx('wall'); return; }
 
     const pos = b.mesh.position;
     const covered = Math.abs(s - owner.c) <= owner.halfW &&
@@ -662,11 +724,11 @@ export function createPolyGame(renderer, opts = {}) {
       b.vel.setLength(BALL_SPEED * speedMul * 1.03);
       b.lastHitter = owner;
       spawnBurst(pos, owner.color);
-      Audio.play('hit');
+      sfx('hit');
     } else {
       // Missed → the edge's owner concedes a life.
       spawnBurst(pos, 0xffffff);
-      Audio.play('score');
+      sfx('score');
       loseLife(owner, b);
     }
   }
@@ -682,7 +744,7 @@ export function createPolyGame(renderer, opts = {}) {
     if (activeBalls().length === 0) serveCenter();
   }
 
-  function eliminate(p) {
+  function eliminate(p, fx = true) {
     p.alive = false;
     p.edge.wall = true;
     p.paddle.visible = false;
@@ -692,8 +754,10 @@ export function createPolyGame(renderer, opts = {}) {
     if (p.edge.wallMesh) p.edge.wallMesh.layers.set(0);
     // Dim the goal strip to a dead grey.
     if (p.edge.stripMat) { p.edge.stripMat.color.setHex(0x394050); p.edge.stripMat.emissive.setHex(0x0a0d12); }
-    spawnBurst(new THREE.Vector3(p.edge.mid.x, PLAY_H / 2, p.edge.mid.y), p.color);
-    Audio.play('eliminate');
+    if (fx) {
+      spawnBurst(new THREE.Vector3(p.edge.mid.x, PLAY_H / 2, p.edge.mid.y), p.color);
+      sfx('eliminate');
+    }
   }
 
   // =========================================================================
@@ -702,17 +766,19 @@ export function createPolyGame(renderer, opts = {}) {
   function updateFire(dt) {
     for (const p of players) {
       if (!p.alive) continue;
+      const slot = seatOf(p);
       let fire = false;
-      if (p.index === 0) fire = keys.has(binds.p1Shoot);
-      else if (p.index === 1) fire = keys.has(binds.p2Shoot);
-      else { const pad = padForPlayer(p.index); fire = padBtn(pad, 7) || padBtn(pad, 0); }
+      if (slot < 0) fire = !!p.netFire;                    // sent by their device
+      else if (slot === 0) fire = keys.has(binds.p1Shoot);
+      else if (slot === 1) fire = keys.has(binds.p2Shoot);
+      else { const pad = padForSeat(slot); fire = padBtn(pad, 7) || padBtn(pad, 0); }
       if (fire && !firePrev[p.index]) fireShotgun(p);
       firePrev[p.index] = fire;
     }
   }
-  function fireShotgun(p) {
-    if (p.ammo <= 0 || now < p.fireReady) return;
-    p.ammo--; p.fireReady = now + FIRE_COOLDOWN;
+  // Pellets + recoil only — shared by the host (who owns the ammo) and guests
+  // (who replay the shot when the host tells them it happened).
+  function spawnPellets(p) {
     const e = p.edge;
     const inX = -e.n.x, inZ = -e.n.y; // inward
     const ox = e.A.x + e.d.x * p.c + inX * 0.6;
@@ -725,9 +791,16 @@ export function createPolyGame(renderer, opts = {}) {
       const sp = (Math.random() - 0.5) * BULLET_SPREAD;
       slot.vel.set(inX * BULLET_SPEED + e.d.x * sp, (Math.random() - 0.5) * BULLET_SPREAD, inZ * BULLET_SPEED + e.d.y * sp);
     }
-    spawnBurst(new THREE.Vector3(ox, p.h, oz), 0xffb14a);
     if (p.gun) p.gun.userData.recoil = 1;
-    Audio.play('shoot');
+    return new THREE.Vector3(ox, p.h, oz);
+  }
+  function fireShotgun(p) {
+    if (p.ammo <= 0 || now < p.fireReady) return;
+    p.ammo--; p.fireReady = now + FIRE_COOLDOWN;
+    const muzzle = spawnPellets(p);
+    netEmit({ k: 'e', e: 'f', i: p.index });
+    spawnBurst(muzzle, 0xffb14a);
+    sfx('shoot');
     syncHud();
   }
   function updateBullets(dt) {
@@ -802,11 +875,11 @@ export function createPolyGame(renderer, opts = {}) {
     group.userData.shape = mesh;
     return group;
   }
-  function spawnPowerupAt(type, x, y, z) {
+  function spawnPowerupAt(type, x, y, z, id) {
     const group = makePowerupMesh(type);
     group.position.set(x, y, z);
     arenaGroup.add(group);
-    powerups.push({ type, group, baseY: y, phase: Math.random() * Math.PI * 2 });
+    powerups.push({ id: id ?? puNextId++, type, group, baseY: y, phase: Math.random() * Math.PI * 2 });
   }
   function spawnPowerup() {
     const p = randInterior();
@@ -861,7 +934,7 @@ export function createPolyGame(renderer, opts = {}) {
       }
     }
     showToast(`${who}${cfg.label}`, cfg.color);
-    Audio.play(pu.type === 'MULTIBALL' ? 'multiball' : 'powerup');
+    sfx(pu.type === 'MULTIBALL' ? 'multiball' : 'powerup');
     syncHud();
   }
   function applyGrow(p) {
@@ -908,26 +981,33 @@ export function createPolyGame(renderer, opts = {}) {
   // HUD (DOM, injected)
   // =========================================================================
   let hudRoot = null, cardEls = [], toastEl = null, countEl = null, bannerEl = null,
-      winnerEl = null;
-  // Card anchor per player: 3P = three columns; 4P = four quadrant corners.
-  function cardCss(i) {
-    if (N === 3) {
+      winnerEl = null, remoteEl = null;
+  // Card anchor for a seat on this device: 1 seat = top-left, 2 = two corners,
+  // 3 = three columns, 4 = four quadrant corners.
+  function cardCss(slot) {
+    const n = seatCount();
+    if (n <= 1) return 'top:14px;left:14px;';
+    if (n === 2) return ['top:14px;left:14px;', 'top:14px;right:14px;'][slot];
+    if (n === 3) {
       const lefts = ['14px', 'calc(33.333% + 14px)', 'calc(66.666% + 14px)'];
-      return `top:14px;left:${lefts[i]};`;
+      return `top:14px;left:${lefts[slot]};`;
     }
     return ['top:14px;left:14px;', 'top:14px;right:14px;',
-            'bottom:14px;left:14px;', 'bottom:14px;right:14px;'][i];
+            'bottom:14px;left:14px;', 'bottom:14px;right:14px;'][slot];
   }
   function buildHud() {
     if (hudRoot) hudRoot.remove();
     hudRoot = document.createElement('div');
     hudRoot.id = 'polyhud';
-    const dividers = N === 3
+    const n = seatCount();
+    const dividers = n === 3
       ? '<div class="pdivv" style="left:33.333%"></div><div class="pdivv" style="left:66.666%"></div>'
-      : '<div class="pdivv"></div><div class="pdivh"></div>';
+      : n === 2 ? '<div class="pdivv"></div>'
+      : n >= 4 ? '<div class="pdivv"></div><div class="pdivh"></div>' : '';
     hudRoot.innerHTML = dividers + `
       <div class="pcount"></div>
       <div class="ptoast"></div>
+      <div class="premote"></div>
       <div class="pbanner">
         <div class="ptrophy">🏆</div>
         <div class="pwinner">PLAYER 1 WINS</div>
@@ -935,23 +1015,41 @@ export function createPolyGame(renderer, opts = {}) {
           <button class="pbtn prematch">REMATCH</button>
           <button class="pbtn pmenu">MENU</button>
         </div>
-        <div class="psub">R to rematch · M mutes</div>
+        <div class="psub">${isGuest() ? 'waiting for the host to start a rematch' : 'R to rematch · M mutes'}</div>
       </div>`;
     document.body.appendChild(hudRoot);
     toastEl = hudRoot.querySelector('.ptoast');
     countEl = hudRoot.querySelector('.pcount');
     bannerEl = hudRoot.querySelector('.pbanner');
     winnerEl = hudRoot.querySelector('.pwinner');
-    hudRoot.querySelector('.prematch').addEventListener('click', restart);
+    remoteEl = hudRoot.querySelector('.premote');
+    const rematchBtn = hudRoot.querySelector('.prematch');
+    if (isGuest()) rematchBtn.remove();   // only the host can start the next round
+    else rematchBtn.addEventListener('click', restart);
     hudRoot.querySelector('.pmenu').addEventListener('click', () => quit());
 
+    // One card per player: the people at this device get a card over their own
+    // view; everyone else is a compact score card in the strip along the bottom.
     cardEls = [];
+    const remotes = [];
     for (const p of players) {
       const card = document.createElement('div');
       card.className = 'pcard';
-      card.style.cssText = 'position:absolute;' + cardCss(p.index);
-      hudRoot.appendChild(card);
-      cardEls.push(card);
+      const slot = seatOf(p);
+      if (slot >= 0) {
+        card.style.cssText = 'position:absolute;' + cardCss(slot);
+        hudRoot.appendChild(card);
+      } else {
+        remotes.push(card);
+      }
+      cardEls[p.index] = card;
+    }
+    if (remotes.length) {
+      const label = document.createElement('div');
+      label.className = 'rlabel';
+      label.textContent = 'ELSEWHERE';
+      remoteEl.appendChild(label);
+      for (const c of remotes) remoteEl.appendChild(c);
     }
     syncHud();
   }
@@ -959,22 +1057,27 @@ export function createPolyGame(renderer, opts = {}) {
   function syncHud() {
     if (!cardEls.length) return;
     for (const p of players) {
+      const el = cardEls[p.index];
+      if (!el) continue;
       const hex = '#' + p.color.toString(16).padStart(6, '0');
       const hearts = '♥'.repeat(p.lives) + '<span style="opacity:.25">' + '♥'.repeat(START_LIVES - p.lives) + '</span>';
+      const mine = seatOf(p) >= 0;
       const fx = [];
       if (p.growUntil > now) fx.push('BIG');
       if (p.magnetUntil > now) fx.push('MAGNET');
       if (p.slowUntil > now) fx.push('VINED');
       if (p.ammo > 0) fx.push('×' + p.ammo);
-      cardEls[p.index].innerHTML =
+      el.innerHTML =
         `<div class="pn" style="color:${hex}">${p.name}${p.alive ? '' : ' · OUT'}</div>` +
         `<div class="ph" style="color:${hex}">${p.alive ? hearts : '—'}</div>` +
+        (net && mine ? '<div class="pyou">YOU</div>' : '') +
         (fx.length ? `<div class="pfx">${fx.join(' · ')}</div>` : '');
-      cardEls[p.index].style.opacity = p.alive ? '1' : '0.5';
+      el.style.opacity = p.alive ? '1' : '0.5';
     }
   }
   let toastUntil = 0;
   function showToast(text, color) {
+    netEmit({ k: 'e', e: 't', s: text, c: color });
     if (!toastEl) return;
     toastEl.textContent = text;
     toastEl.style.color = '#' + color.toString(16).padStart(6, '0');
@@ -994,10 +1097,11 @@ export function createPolyGame(renderer, opts = {}) {
     countdown = 3; showCount('3');
     balls.forEach(deactivateBall);
   }
-  function endMatch(winner) {
+  function endMatch(winner, fx = true) {
     matchOver = true;
+    lastWinner = winner || null;
     balls.forEach(deactivateBall);
-    Audio.play('win');
+    if (fx) sfx('win');
     Audio.startMusic('victory');
     Confetti.burst();
     if (winnerEl) {
@@ -1009,10 +1113,11 @@ export function createPolyGame(renderer, opts = {}) {
     if (bannerEl) bannerEl.classList.add('show');
   }
   function restart() {
+    netEmit({ k: 'e', e: 'r' });
     if (bannerEl) bannerEl.classList.remove('show');
     Confetti.stop();
     Audio.startMusic('game');
-    matchOver = false;
+    matchOver = false; lastWinner = null;
     speedMul = 1; speedUntil = 0; arenaSpinUntil = 0; arenaSpinAngle = 0;
     arenaGroup.rotation.y = 0;
     for (let i = powerups.length - 1; i >= 0; i--) removePowerup(i);
@@ -1040,14 +1145,17 @@ export function createPolyGame(renderer, opts = {}) {
   // Update + render
   // =========================================================================
   function update(dt) {
-    if (!running || matchOver) return;
+    if (!running) return;
+    if (isGuest()) return guestUpdate(dt);
+    if (matchOver) { hostNetTick(dt); return; } // keep streaming so guests see the banner
     now += dt;
     if (countdown > 0) {
       const before = Math.ceil(countdown);
       countdown -= dt;
-      if (countdown > 0) { const a = Math.ceil(countdown); if (a !== before) { showCount(String(a)); Audio.play('count'); } }
-      else { showCount('GO!'); Audio.play('go'); goUntil = now + 0.7; nextSpawn = now + PU_SPAWN_MIN; serveCenter(); }
+      if (countdown > 0) { const a = Math.ceil(countdown); if (a !== before) { showCount(String(a)); sfx('count'); } }
+      else { showCount('GO!'); sfx('go'); goUntil = now + 0.7; nextSpawn = now + PU_SPAWN_MIN; serveCenter(); }
       movePaddles(dt);
+      hostNetTick(dt);
       return;
     }
     if (goUntil && now > goUntil) { if (countEl) countEl.style.display = 'none'; goUntil = 0; }
@@ -1063,13 +1171,167 @@ export function createPolyGame(renderer, opts = {}) {
     updateGuns(dt);
 
     if (toastUntil && now > toastUntil) { toastEl.classList.remove('show'); toastUntil = 0; }
+    hostNetTick(dt);
   }
 
-  // Per-player viewport rects in GL coords (origin bottom-left). 3P uses three
-  // tall columns (bigger per player); 4P uses a 2×2 grid.
-  function playerRects() {
-    const w = window.innerWidth, h = window.innerHeight;
-    if (N === 3) {
+  // =========================================================================
+  // Host → guests: 30 Hz state snapshots
+  // =========================================================================
+  const r2 = (v) => +v.toFixed(2);
+  function buildSnapshot() {
+    const bs = [];
+    for (let i = 0; i < balls.length; i++) {
+      const b = balls[i];
+      if (!b.active) continue;
+      const p = b.mesh.position, v = b.vel;
+      bs.push([i, r2(p.x), r2(p.y), r2(p.z), r2(v.x), r2(v.y), r2(v.z)]);
+    }
+    return {
+      k: 's',
+      ps: players.map((p) => [
+        r2(p.c), r2(p.h), p.lives, p.alive ? 1 : 0, p.ammo,
+        (p.growUntil > now ? 1 : 0) | (p.magnetUntil > now ? 2 : 0) | (p.slowUntil > now ? 4 : 0),
+        r2(p.halfW), r2(p.halfH),
+      ]),
+      bs,
+      pu: powerups.map((pu) => [pu.id, PU_KEYS.indexOf(pu.type), r2(pu.group.position.x), r2(pu.baseY), r2(pu.group.position.z)]),
+      sp: +arenaSpinAngle.toFixed(3),
+      cd: countdown > 0 ? Math.ceil(countdown) : (goUntil && now < goUntil ? -1 : 0),
+      ov: matchOver ? (lastWinner ? lastWinner.index : -1) : null,
+    };
+  }
+  function hostNetTick(dt) {
+    if (!net || net.role !== 'host') return;
+    snapTimer -= dt;
+    if (snapTimer > 0) return;
+    snapTimer = SNAP_DT;
+    netSend(buildSnapshot());
+  }
+
+  // Input arriving from another device (main.js has already checked that the
+  // sender actually owns this player).
+  function applyRemoteInput(index, c, h, fire) {
+    const p = players[index];
+    if (!p) return;
+    const cMin = p.halfW, cMax = p.edge.L - p.halfW;
+    p.netC = THREE.MathUtils.clamp(c, cMin, cMax);
+    p.netH = THREE.MathUtils.clamp(h, p.halfH, PLAY_H - p.halfH);
+    p.netFire = !!fire;
+  }
+
+  // =========================================================================
+  // Guest: apply the host's state, predict our own paddles, render our views
+  // =========================================================================
+  function applySnapshot(s) {
+    // ---- Players ----
+    for (let i = 0; i < players.length && i < s.ps.length; i++) {
+      const p = players[i], d = s.ps[i];
+      const [c, h, lives, alive, ammo, flags, halfW, halfH] = d;
+      if (seatOf(p) < 0) { p.netC = c; p.netH = h; }   // theirs: smooth toward it
+      p.lives = lives; p.ammo = ammo;
+      p.halfW = halfW; p.halfH = halfH;
+      p.growUntil = (flags & 1) ? now + 1 : 0;
+      p.magnetUntil = (flags & 2) ? now + 1 : 0;
+      p.slowUntil = (flags & 4) ? now + 1 : 0;
+      p.paddle.scale.set((flags & 1) ? GROW_FACTOR : 1, (flags & 1) ? GROW_FACTOR : 1, 1);
+      if (p.alive && !alive) eliminate(p, false);      // the burst/sound arrive as events
+      else if (!p.alive && alive) { p.alive = true; p.edge.wall = false; }
+      p.paddle.visible = p.alive;
+    }
+    // ---- Balls ----
+    const live = new Set(s.bs.map((b) => b[0]));
+    for (let i = 0; i < balls.length; i++) if (!live.has(i) && balls[i].active) deactivateBall(balls[i]);
+    for (const [i, x, y, z, vx, vy, vz] of s.bs) {
+      const b = balls[i];
+      if (!b) continue;
+      if (!b.active) { b.active = true; b.mesh.visible = true; b.mesh.position.set(x, y, z); }
+      b.netPos = b.netPos || new THREE.Vector3();
+      b.netPos.set(x, y, z);
+      b.vel.set(vx, vy, vz);
+    }
+    // ---- Power-ups ----
+    const ids = new Set(s.pu.map((p) => p[0]));
+    for (let i = powerups.length - 1; i >= 0; i--) if (!ids.has(powerups[i].id)) removePowerup(i);
+    for (const [id, t, x, y, z] of s.pu) {
+      if (powerups.some((pu) => pu.id === id)) continue;
+      spawnPowerupAt(PU_KEYS[t] || PU_KEYS[0], x, y, z, id);
+    }
+    // ---- Arena spin / countdown / match state ----
+    netSpin = s.sp;
+    if (s.cd !== netCd) {
+      if (s.cd > 0) showCount(String(s.cd));
+      else if (s.cd === -1) showCount('GO!');
+      else if (countEl) countEl.style.display = 'none';
+      netCd = s.cd;
+    }
+    if (s.ov != null && !matchOver) endMatch(s.ov >= 0 ? players[s.ov] : null, false);
+    else if (s.ov == null && matchOver) restart();   // host started a rematch
+    syncHud();
+  }
+
+  function guestUpdate(dt) {
+    now += dt;
+    movePaddles(dt);          // predicts our seats, eases the remote ones
+    updateGuns(dt);
+    // Dead-reckon the balls between snapshots, easing onto the host's truth.
+    for (const b of balls) {
+      if (!b.active) continue;
+      b.mesh.position.addScaledVector(b.vel, dt);
+      if (b.netPos) {
+        b.netPos.addScaledVector(b.vel, dt);
+        b.mesh.position.lerp(b.netPos, 1 - Math.exp(-10 * dt));
+      }
+      updateTrail(b);
+    }
+    // Pellets are pure decoration on this side — no ball interaction.
+    for (const b of bullets) {
+      if (b.life <= 0) continue;
+      b.life -= dt;
+      if (b.life <= 0) { b.mesh.visible = false; continue; }
+      b.mesh.position.addScaledVector(b.vel, dt);
+    }
+    for (const pu of powerups) {
+      pu.group.userData.shape.rotation.x += dt * 1.2;
+      pu.group.userData.shape.rotation.y += dt * 1.6;
+      pu.group.position.y = pu.baseY + Math.sin(now * 2 + pu.phase) * 0.35;
+    }
+    for (const p of players) {
+      if (!p.vine) continue;
+      p.vine.visible = running && p.slowUntil > now && p.alive && !arenaSpinning();
+      if (p.vine.visible) { p.vine.position.copy(p.paddle.position); p.vine.rotation.y += 0.03; }
+    }
+    arenaSpinAngle = THREE.MathUtils.damp(arenaSpinAngle, netSpin, 10, dt);
+    if (Math.abs(arenaSpinAngle - netSpin) < 0.002) arenaSpinAngle = netSpin;
+    arenaGroup.rotation.y = arenaSpinAngle;
+    updateBursts(dt);
+    if (toastUntil && now > toastUntil) { toastEl.classList.remove('show'); toastUntil = 0; }
+  }
+
+  // Messages from the host (guest side).
+  function applyNetMessage(m) {
+    if (!m) return;
+    if (m.k === 's') return applySnapshot(m);
+    if (m.k !== 'e') return;
+    switch (m.e) {
+      case 'a': Audio.play(m.n); break;
+      case 'b': spawnBurst(new THREE.Vector3(m.x, m.y, m.z), m.c); break;
+      case 't': showToast(m.s, m.c); break;
+      case 'f': { const p = players[m.i]; if (p) spawnPellets(p); break; }
+      case 'r': restart(); break;
+      default: break;
+    }
+  }
+
+  // Viewport rects in GL coords (origin bottom-left) for the seats on THIS
+  // device: 1 = full screen, 2 = side by side, 3 = columns, 4 = 2×2 grid.
+  function seatRects() {
+    const w = window.innerWidth, h = window.innerHeight, n = seatCount();
+    if (n <= 1) return [{ x: 0, y: 0, w, h }];
+    if (n === 2) {
+      const hw = Math.floor(w / 2);
+      return [{ x: 0, y: 0, w: hw, h }, { x: hw, y: 0, w: w - hw, h }];
+    }
+    if (n === 3) {
       const c = Math.floor(w / 3);
       return [
         { x: 0,     y: 0, w: c,         h },
@@ -1079,10 +1341,10 @@ export function createPolyGame(renderer, opts = {}) {
     }
     const hw = Math.floor(w / 2), hh = Math.floor(h / 2);
     return [
-      { x: 0,  y: hh, w: hw,     h: h - hh }, // P1 top-left
-      { x: hw, y: hh, w: w - hw, h: h - hh }, // P2 top-right
-      { x: 0,  y: 0,  w: hw,     h: hh },     // P3 bottom-left
-      { x: hw, y: 0,  w: w - hw, h: hh },     // P4 bottom-right
+      { x: 0,  y: hh, w: hw,     h: h - hh }, // seat 1 top-left
+      { x: hw, y: hh, w: w - hw, h: h - hh }, // seat 2 top-right
+      { x: 0,  y: 0,  w: hw,     h: hh },     // seat 3 bottom-left
+      { x: hw, y: 0,  w: w - hw, h: hh },     // seat 4 bottom-right
     ];
   }
   // Auto-fit fov so the arena fills each cell regardless of its aspect.
@@ -1095,10 +1357,12 @@ export function createPolyGame(renderer, opts = {}) {
   }
   function render() {
     if (!running) return;
-    const rects = playerRects();
+    const rects = seatRects();
+    const seats = localPlayers();
     renderer.setScissorTest(true);
-    for (let i = 0; i < players.length; i++) {
-      const p = players[i], r = rects[i];
+    for (let i = 0; i < seats.length; i++) {
+      const p = seats[i], r = rects[i];
+      if (!r) continue;
       frameCam(p.cam, r.w / r.h);
       renderer.setViewport(r.x, r.y, r.w, r.h);
       renderer.setScissor(r.x, r.y, r.w, r.h);
@@ -1110,7 +1374,10 @@ export function createPolyGame(renderer, opts = {}) {
   // =========================================================================
   // Public API
   // =========================================================================
-  function start(playerCount) {
+  function start(playerCount, netCfg = null) {
+    // netCfg = { role:'host'|'guest', locals:[playerIndex…], send(msg) }
+    net = netCfg;
+    snapTimer = 0; netCd = 0; netSpin = 0; lastWinner = null; puNextId = 1;
     buildArena(playerCount);
     buildHud();
     document.body.classList.add('polyactive');
@@ -1140,6 +1407,7 @@ export function createPolyGame(renderer, opts = {}) {
     renderer.domElement.removeEventListener('touchcancel', onTouch);
     document.body.classList.remove('polyactive');
     if (hudRoot) { hudRoot.remove(); hudRoot = null; cardEls = []; }
+    net = null;
   }
   function quit() { stop(); onExit(); }
 
@@ -1149,6 +1417,10 @@ export function createPolyGame(renderer, opts = {}) {
     isRunning: () => running,
     isMatchOver: () => matchOver,
     goHome: () => quit(),
+    // ---- Networking hooks (driven by main.js, which owns the connections) --
+    onHostMessage: applyRemoteInput,  // (playerIndex, c, h, fire) from a guest
+    onGuestMessage: applyNetMessage,  // snapshot / event from the host
+    isGuest: () => isGuest(),
     resize: () => { /* rects recomputed each frame; nothing to cache */ },
   };
 }

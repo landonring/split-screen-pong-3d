@@ -6,6 +6,9 @@ import * as Audio from './audio.js';
 import * as Confetti from './confetti.js';
 import { createCursor } from './cursor.js';
 import { binds, setBind, resetBinds, BIND_META, keyLabel } from './binds.js';
+import * as Net from './net.js';
+import * as Head from './headtrack.js';
+import { head } from './headtrack.js';
 
 const gameCursor = createCursor();
 // Touch device? Then hide the gamepad reticle and show on-screen buttons.
@@ -217,6 +220,8 @@ let botLevel = 'MEDIUM'; // key into BOT_LEVELS
 let playerCount = 2;     // 2 = classic; 3/4 = polygon mode
 let polyGame = null;     // lazily-created N-player engine (poly.js)
 let polyActive = false;  // when true the poly engine drives update/render
+let online = null;       // classic 1v1 across devices: { role, remote, target, prevCd }
+let onlineSnap = null;   // latest state snapshot received by a classic guest
 // Assets handed to the polygon engine once the models finish loading.
 let glbWallMat = null, glbFloorMat = null, gunModelSrc = null;
 let now = 0;                    // monotonic game time (seconds)
@@ -278,7 +283,7 @@ function startGame(bot) {
 }
 
 // ---- Polygon (3/4-player) mode entry/exit ----
-function startPolyMode() {
+function ensurePolyGame() {
   if (!polyGame) {
     polyGame = createPolyGame(renderer, {
       wallMaterial: glbWallMat, floorMaterial: glbFloorMat,
@@ -286,6 +291,10 @@ function startPolyMode() {
       onExit: exitPolyMode,
     });
   }
+  return polyGame;
+}
+function startPolyMode() {
+  ensurePolyGame();
   started = true; polyActive = true;
   elStart.classList.add('hidden');
   document.body.classList.remove('pregame');
@@ -295,6 +304,7 @@ function startPolyMode() {
 function exitPolyMode() {
   // Called by poly.js after it tears down its own HUD/listeners.
   polyActive = false; started = false;
+  if (room) closeRoom();   // an online match ended with it
   Confetti.stop();
   Audio.startMusic('menu');
   document.body.classList.add('pregame');
@@ -355,19 +365,21 @@ document.querySelector('[data-play]').addEventListener('click', () => startGame(
 document.getElementById('fsCorner').addEventListener('click', toggleFullscreen);
 document.querySelector('[data-fsmenu]').addEventListener('click', toggleFullscreen);
 document.querySelector('[data-rematch]').addEventListener('click', () => restartMatch());
-document.querySelector('[data-menu]').addEventListener('click', () => returnToMenu());
+document.querySelector('[data-menu]').addEventListener('click', () => { if (netRole) leaveOnline(); else returnToMenu(); });
 
 // ---------------------------------------------------------------------------
 // Settings (volumes, cursor sensitivity, keybinds) — persisted to localStorage
 // ---------------------------------------------------------------------------
 const SETTINGS_KEY = 'splitpong.settings';
 const settings = Object.assign(
-  { master: 0.8, music: 0.6, ball: 0.85, gun: 0.7, sensitivity: 0.5 },
+  { master: 0.8, music: 0.6, ball: 0.85, gun: 0.7, sensitivity: 0.5, headSens: 0.5, headMirror: true },
   (() => { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch (e) { return {}; } })(),
 );
 function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ } }
 function applySetting(key) {
   if (key === 'sensitivity') gameCursor.setSensitivity(settings.sensitivity);
+  else if (key === 'headSens') Head.setSensitivity(settings.headSens);
+  else if (key === 'headMirror') Head.setMirror(settings.headMirror);
   else Audio.setVolume(key, settings[key]);
 }
 for (const k of Object.keys(settings)) applySetting(k); // apply saved values on load
@@ -427,16 +439,523 @@ function captureBind(action, btn) {
 }
 document.getElementById('resetBinds').addEventListener('click', () => { resetBinds(); renderBinds(); });
 
-function openSettings() { settingsOpen = true; syncSliders(); renderBinds(); elSettings.classList.remove('hidden'); }
+// ---- Head tracking (webcam) — steers Player 1's paddle -------------------
+const elHeadToggle = document.querySelector('[data-headtoggle]');
+const elHeadRecenter = document.querySelector('[data-headrecenter]');
+const elHeadMirror = document.querySelector('[data-headmirror]');
+const elHeadStatus = document.querySelector('[data-headstatus]');
+const HEAD_HELP = 'Uses your webcam to move Player 1\'s paddle — lean left/right and up/down and the ball follows your head. Video never leaves this device.';
+
+Head.onStatus((text, warn) => {
+  if (!elHeadStatus) return;
+  elHeadStatus.textContent = text;
+  elHeadStatus.classList.toggle('warn', !!warn);
+});
+function syncHeadUi() {
+  const on = Head.isRunning();
+  elHeadToggle.textContent = on ? 'ON' : 'OFF';
+  elHeadToggle.classList.toggle('on', on);
+  elHeadRecenter.hidden = !on;
+  elHeadMirror.textContent = settings.headMirror ? 'ON' : 'OFF';
+  elHeadMirror.classList.toggle('on', settings.headMirror);
+  if (!on && elHeadStatus && !elHeadStatus.classList.contains('warn')) elHeadStatus.textContent = HEAD_HELP;
+}
+elHeadToggle.addEventListener('click', async () => {
+  elHeadToggle.textContent = Head.isRunning() ? 'OFF' : '…';
+  if (elHeadStatus) elHeadStatus.classList.remove('warn');
+  await Head.toggle();
+  syncHeadUi();
+});
+elHeadRecenter.addEventListener('click', () => {
+  Head.recenter();
+  if (elHeadStatus) { elHeadStatus.textContent = 'Recentred — that head position is now the middle of your paddle range.'; elHeadStatus.classList.remove('warn'); }
+});
+elHeadMirror.addEventListener('click', () => {
+  settings.headMirror = !settings.headMirror;
+  applySetting('headMirror'); saveSettings(); syncHeadUi();
+});
+syncHeadUi();
+
+function openSettings() { settingsOpen = true; syncSliders(); renderBinds(); syncHeadUi(); elSettings.classList.remove('hidden'); }
 function closeSettings() { settingsOpen = false; elSettings.classList.add('hidden'); }
 document.getElementById('settingsMenuBtn').addEventListener('click', openSettings);
 document.getElementById('closeSettings').addEventListener('click', closeSettings);
 
-// In-battle home button → back to the menu (works for both modes).
+// In-battle home button → back to the menu (works for every mode).
 document.getElementById('homeBtn').addEventListener('click', () => {
-  if (polyActive) { if (polyGame) polyGame.goHome(); }
+  if (netRole) leaveOnline();
+  else if (polyActive) { if (polyGame) polyGame.goHome(); }
   else returnToMenu();
 });
+
+// ===========================================================================
+// Online play — invite codes (net.js)
+//
+// One device hosts: it runs the physics and streams the world to everyone
+// else. Each device says how many people are sitting at it (1 or 2), so you
+// can have two players split-screen on a laptop and a third on a tablet — and
+// nobody sees anyone else's screen, just their score on the HUD.
+//
+// 2 players total  -> the classic arena (host = P1, guest = P2)
+// 3-4 players      -> the polygon arena (poly.js does its own sync)
+// ===========================================================================
+const MAX_PLAYERS = 4;
+const PLAYER_TINT = ['#35e04a', '#4d8dff', '#ff7a3c', '#b96bff'];
+
+let room = null;      // net.js handle (host room or guest link)
+let netRole = null;   // 'host' | 'guest' while we're in a room
+let mySeats = 1;      // players sitting at THIS device
+let roster = [];      // host's view: [{ id, seats }] in join order ('me' = host)
+let lobbyInfo = null; // guest's view of the roster, as sent by the host
+let seatIdx = [];     // player indices this device controls
+
+const elOnlineModal = document.getElementById('onlineModal');
+const elOnTitle = document.querySelector('[data-ontitle]');
+const elOnHost = document.querySelector('[data-onhost]');
+const elOnCode = document.querySelector('[data-oncode]');
+const elOnJoin = document.querySelector('[data-onjoin]');
+const elOnStatus = document.querySelector('[data-onstatus]');
+const elOnSeats = document.querySelector('[data-onseats]');
+const elOnRoster = document.querySelector('[data-onroster]');
+const elOnHint = document.querySelector('[data-onhint]');
+const elOnStart = document.querySelector('[data-onstart]');
+const joinCodeInput = document.getElementById('joinCode');
+const seatBtns = Array.from(document.querySelectorAll('[data-seats]'));
+
+function setOnStatus(t) { elOnStatus.textContent = t || ' '; }
+function openOnlineModal() { settingsOpen = true; elOnlineModal.classList.remove('hidden'); }
+function closeOnlineModal() { settingsOpen = false; elOnlineModal.classList.add('hidden'); }
+
+function whenReady(fn) {                 // the arena model may still be loading
+  if (ready) fn();
+  else setTimeout(() => whenReady(fn), 150);
+}
+
+// ---- Lobby rendering ------------------------------------------------------
+// Both roles render from the same shape: [{ host, seats, you }] in join order.
+function lobbyDevices() {
+  if (netRole === 'host') return roster.map((d) => ({ host: d.id === 'me', seats: d.seats, you: d.id === 'me' }));
+  return (lobbyInfo && lobbyInfo.devices) || [];
+}
+function renderLobby() {
+  const devices = lobbyDevices();
+  let next = 0;
+  elOnRoster.innerHTML = '';
+  for (const d of devices) {
+    const mine = d.seats;
+    const pills = [];
+    for (let i = 0; i < mine; i++, next++) {
+      pills.push(`<span class="onpill" style="color:${PLAYER_TINT[next] || '#eaf2ff'}">P${next + 1}</span>`);
+    }
+    const row = document.createElement('div');
+    row.className = 'ondev';
+    row.innerHTML = `<span class="ondevname">${d.host ? 'HOST' : 'DEVICE'}${d.you ? ' · THIS DEVICE' : ''}</span>` +
+                    `<span class="ondevwho">${pills.join('')}</span>`;
+    elOnRoster.appendChild(row);
+  }
+  const total = next;
+  seatBtns.forEach((b) => b.classList.toggle('active', +b.dataset.seats === mySeats));
+  if (netRole === 'host') {
+    const canStart = devices.length >= 2 && total >= 2 && total <= MAX_PLAYERS;
+    elOnStart.hidden = false;
+    elOnStart.disabled = !canStart;
+    elOnHint.textContent = devices.length < 2
+      ? 'Send the code (or the link) to the other device — they pick JOIN WITH CODE.'
+      : `${total} players ready · ${total === 2 ? 'classic arena' : total + '-sided arena'}. Everyone only ever sees their own view.`;
+  } else {
+    elOnStart.hidden = true;
+    elOnHint.textContent = devices.length ? 'Waiting for the host to start the match…' : '';
+  }
+}
+
+// ---- Host -----------------------------------------------------------------
+function deviceById(id) { return roster.find((d) => d.id === id); }
+function rosterTotal() { return roster.reduce((n, d) => n + d.seats, 0); }
+// Player indices are handed out in join order: host's seats first.
+function assignIndices() {
+  const map = {};
+  let next = 0;
+  for (const d of roster) { map[d.id] = []; for (let i = 0; i < d.seats; i++) map[d.id].push(next++); }
+  return map;
+}
+function broadcastLobby() {
+  if (netRole !== 'host' || !room) return;
+  const map = assignIndices();
+  for (const d of roster) {
+    if (d.id === 'me') continue;
+    room.send(d.id, {
+      k: 'lobby',
+      devices: roster.map((x) => ({ host: x.id === 'me', seats: x.seats, you: x.id === d.id })),
+      you: map[d.id],
+    });
+  }
+  renderLobby();
+}
+// Free seats a device may claim (never letting the room exceed 4 players).
+function seatsAllowed(id) {
+  const own = deviceById(id);
+  const others = rosterTotal() - (own ? own.seats : 0);
+  return Math.max(1, Math.min(2, MAX_PLAYERS - others));
+}
+
+function doHost() {
+  closeRoom();   // drop anything left over from a previous lobby
+  if (!Net.available()) { openOnlineModal(); showLobbyMode('host'); setOnStatus('Networking script blocked — check your connection and reload.'); return; }
+  netRole = 'host'; mySeats = 1; roster = [{ id: 'me', seats: 1 }]; lobbyInfo = null;
+  openOnlineModal(); showLobbyMode('host');
+  setOnStatus('Creating a room…');
+  room = Net.hostRoom({
+    onCode: (code) => {
+      elOnCode.textContent = code;
+      setOnStatus('Share this code — the room stays open until you start.');
+      renderLobby();
+    },
+    onJoin: (id) => {
+      if (rosterTotal() >= MAX_PLAYERS) { room.send(id, { k: 'full' }); room.drop(id); return; }
+      roster.push({ id, seats: 1 });
+      Audio.play('powerup');
+      setOnStatus('A device joined!');
+      broadcastLobby();
+    },
+    onData: (id, msg) => onHostData(id, msg),
+    onLeave: (id) => {
+      roster = roster.filter((d) => d.id !== id);
+      if (started) { showToast('A PLAYER LEFT', 0xff6b6b); leaveOnline(); }
+      else { setOnStatus('A device disconnected.'); broadcastLobby(); }
+    },
+    onError: (e) => setOnStatus('Error: ' + ((e && e.type) || 'could not create the room')),
+  });
+}
+
+function onHostData(id, msg) {
+  if (!msg) return;
+  if (msg.k === 'hello') {
+    const d = deviceById(id);
+    if (!d) return;
+    d.seats = Math.max(1, Math.min(msg.seats | 0 || 1, seatsAllowed(id)));
+    broadcastLobby();
+    return;
+  }
+  // ---- In-match input from a guest -------------------------------------
+  const map = assignIndices();
+  const owns = map[id] || [];
+  if (msg.k === 'in' && polyActive && polyGame) {
+    for (const [idx, c, h, f] of msg.p) if (owns.includes(idx)) polyGame.onHostMessage(idx, c, h, f);
+  } else if (msg.k === 'i' && online && online.role === 'host') {
+    // Classic 1v1: the guest is P2 and streams a target position.
+    online.remote.x = THREE.MathUtils.clamp(msg.x, bounds.minX + P2.half.x, bounds.maxX - P2.half.x);
+    online.remote.y = THREE.MathUtils.clamp(msg.y, bounds.minY + P2.half.y, bounds.maxY - P2.half.y);
+  }
+}
+
+function startOnlineMatch() {
+  const total = rosterTotal();
+  if (netRole !== 'host' || roster.length < 2 || total < 2 || total > MAX_PLAYERS) return;
+  const map = assignIndices();
+  for (const d of roster) if (d.id !== 'me') room.send(d.id, { k: 'start', n: total, you: map[d.id] });
+  seatIdx = map.me;
+  closeOnlineModal();
+  whenReady(() => (total === 2 ? beginClassicOnline('host') : beginPolyOnline('host', total, seatIdx)));
+}
+
+// ---- Guest ----------------------------------------------------------------
+function doJoin(prefill) {
+  closeRoom();
+  netRole = null; lobbyInfo = null; mySeats = 1;
+  openOnlineModal(); showLobbyMode('join');
+  joinCodeInput.value = prefill || '';
+  setOnStatus(Net.available() ? '' : 'Networking script blocked — check your connection and reload.');
+  if (!prefill) setTimeout(() => joinCodeInput.focus(), 60);
+}
+function doConnect() {
+  if (!Net.available()) { setOnStatus('Networking unavailable.'); return; }
+  const code = (joinCodeInput.value || '').trim().toUpperCase();
+  if (code.length < 3) { setOnStatus('Type the 4-letter code from the host.'); return; }
+  if (room) { try { room.close(); } catch (e) { /* */ } room = null; }   // retry cleanly
+  Audio.unlock();
+  setOnStatus('Connecting…');
+  netRole = 'guest';
+  room = Net.joinRoom(code, {
+    onConnected: () => {
+      setOnStatus('Connected!');
+      elOnJoin.hidden = true;
+      elOnSeats.hidden = false;
+      room.send({ k: 'hello', seats: mySeats });
+    },
+    onRetry: (n) => setOnStatus(`Looking for the host… (try ${n}) — make sure their code screen is still open`),
+    onData: (msg) => onGuestData(msg),
+    onClose: () => {
+      if (started) { showToast('HOST LEFT', 0xff6b6b); leaveOnline(); }
+      else { setOnStatus('Disconnected from the host.'); netRole = null; renderLobby(); }
+    },
+    onError: (e) => setOnStatus(e && e.type === 'not-found'
+      ? 'No room with that code. Check the letters, and that the host still has their code on screen.'
+      : 'Connection failed: ' + ((e && e.type) || 'unknown error')),
+  });
+}
+function onGuestData(msg) {
+  if (!msg) return;
+  switch (msg.k) {
+    case 'lobby':
+      lobbyInfo = msg; seatIdx = msg.you || [];
+      setOnStatus('In the lobby — you are ' + (seatIdx.length > 1 ? 'players ' : 'player ') + seatIdx.map((i) => 'P' + (i + 1)).join(' & '));
+      renderLobby();
+      break;
+    case 'full':
+      setOnStatus('That room is full (4 players max).');
+      break;
+    case 'start':
+      seatIdx = msg.you || [];
+      closeOnlineModal();
+      whenReady(() => (msg.n === 2 ? beginClassicOnline('guest') : beginPolyOnline('guest', msg.n, seatIdx)));
+      break;
+    case 'end':
+      showToast('HOST ENDED THE GAME', 0xff6b6b);
+      leaveOnline();
+      break;
+    default:
+      // In-match traffic.
+      if (polyActive && polyGame) polyGame.onGuestMessage(msg);
+      else if (msg.k === 's' && online) onlineSnap = msg;
+      break;
+  }
+}
+
+// ---- Shared plumbing ------------------------------------------------------
+function netSendGame(msg) {
+  if (!room) return;
+  if (netRole === 'host') room.broadcast(msg);
+  else room.send(msg);
+}
+function showLobbyMode(mode) {
+  elOnTitle.textContent = mode === 'host' ? 'PLAY ONLINE' : 'JOIN A GAME';
+  elOnHost.hidden = mode !== 'host';
+  elOnJoin.hidden = mode !== 'join';
+  elOnSeats.hidden = mode !== 'host';   // guests pick their seats once connected
+  elOnStart.hidden = mode !== 'host';
+  elOnCode.textContent = '';
+  elOnRoster.innerHTML = '';
+  elOnHint.textContent = '';
+  renderLobby();
+}
+function setSeats(n) {
+  mySeats = Math.max(1, Math.min(2, n));
+  if (netRole === 'host') {
+    const me = deviceById('me');
+    if (me) me.seats = Math.min(mySeats, seatsAllowed('me'));
+    mySeats = me ? me.seats : mySeats;
+    broadcastLobby();
+  } else if (room && netRole === 'guest') {
+    room.send({ k: 'hello', seats: mySeats });
+  }
+  renderLobby();
+}
+function closeRoom() {
+  if (room) { try { room.close(); } catch (e) { /* */ } room = null; }
+  netRole = null; roster = []; lobbyInfo = null; seatIdx = [];
+  document.body.classList.remove('online', 'guest');
+}
+function leaveOnline() {
+  const wasPoly = polyActive;
+  if (room && netRole === 'host') room.broadcast({ k: 'end' });
+  closeRoom();
+  online = null; onlineSnap = null;
+  if (wasPoly && polyGame) polyGame.goHome();   // -> exitPolyMode()
+  else returnToMenu();
+}
+
+function inviteLink(code) {
+  const u = new URL(window.location.href);
+  u.search = '?code=' + code;
+  u.hash = '';
+  return u.toString();
+}
+
+// ---- Polygon arena across devices (3-4 players) ---------------------------
+function beginPolyOnline(role, n, locals) {
+  ensurePolyGame();
+  started = true; polyActive = true; matchOver = false;
+  elStart.classList.add('hidden');
+  document.body.classList.remove('pregame', 'solo');
+  document.body.classList.add('online');
+  document.body.classList.toggle('guest', role === 'guest');
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  Audio.unlock();
+  polyGame.start(n, { role, locals, send: netSendGame });
+}
+
+// ---- Classic arena across devices (1v1) ----------------------------------
+// Host-authoritative: it simulates and streams; the guest predicts its own
+// paddle and dead-reckons the ball between snapshots. Power-ups are off here.
+const SNAP_DT = 1 / 30;
+let snapTimer = 0;
+function beginClassicOnline(role) {
+  online = { role, remote: null, target: null, prevCd: 0, ballTarget: new THREE.Vector3() };
+  onlineSnap = null; snapTimer = 0;
+  elStart.classList.add('hidden');
+  document.body.classList.remove('pregame', 'solo');
+  document.body.classList.add('online');
+  document.body.classList.toggle('guest', role === 'guest');
+  started = true; botEnabled = false; matchOver = false; polyActive = false;
+  viewMode = 'third';
+  score1 = 0; score2 = 0; updateScore();
+  resetPlayState();
+  const p1name = document.querySelector('[data-p1name]');
+  const p2name = document.querySelector('[data-p2name]');
+  if (p1name) p1name.innerHTML = 'PLAYER 1' + (role === 'host' ? ' <span class="youtag">YOU</span>' : '');
+  if (p2name) p2name.innerHTML = 'PLAYER 2' + (role === 'guest' ? ' <span class="youtag">YOU</span>' : '');
+  const mid = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2 };
+  Audio.unlock(); Audio.startMusic('game');
+  if (role === 'host') { online.remote = { x: mid.x, y: mid.y }; countdown = 3; showCount('3'); }
+  else { online.target = { x: mid.x, y: mid.y }; }
+  frameCameras();
+}
+
+function sendSnapshot(dt) {
+  if (!online || online.role !== 'host' || !room) return;
+  snapTimer -= dt;
+  if (snapTimer > 0) return;
+  snapTimer = SNAP_DT;
+  const b = balls.find((x) => x.active);
+  const r2 = (v) => +v.toFixed(2);
+  netSendGame({
+    k: 's',
+    p1: [r2(P1.obj.position.x), r2(P1.obj.position.y)],
+    p2: [r2(P2.obj.position.x), r2(P2.obj.position.y)],
+    b: b ? [r2(b.mesh.position.x), r2(b.mesh.position.y), r2(b.mesh.position.z),
+            r2(b.vel.x), r2(b.vel.y), r2(b.vel.z)] : null,
+    s1: score1, s2: score2,
+    cd: countdown > 0 ? Math.ceil(countdown) : (goUntil && now < goUntil ? -1 : 0),
+    over: matchOver ? (score1 >= WIN_SCORE ? 1 : 2) : 0,
+  });
+}
+
+// The guest's own paddle is driven locally (pointer, touch or keys) so it
+// never feels laggy; the position is streamed to the host every frame.
+function setGuestTargetFromClient(cx, cy) {
+  if (!online || online.role !== 'guest' || !bounds) return;
+  online.target = mapTouchToBounds(cx / window.innerWidth, cy / window.innerHeight, -1);
+}
+function setHostTargetFromClient(cx, cy) {
+  if (!online || online.role !== 'host' || !bounds) return;
+  online.target = mapTouchToBounds(cx / window.innerWidth, cy / window.innerHeight, +1);
+}
+window.addEventListener('mousemove', (e) => {
+  if (!online) return;
+  if (online.role === 'guest') setGuestTargetFromClient(e.clientX, e.clientY);
+  else setHostTargetFromClient(e.clientX, e.clientY);
+});
+function handleOnlineTouch(e) {
+  if (!online) return;
+  e.preventDefault();
+  const t = e.touches[0];
+  if (!t) return;
+  if (online.role === 'guest') setGuestTargetFromClient(t.clientX, t.clientY);
+  else setHostTargetFromClient(t.clientX, t.clientY);
+}
+
+function moveOnlineTarget(target, dt, side) {
+  // Keys nudge the same target the pointer sets, so both work together.
+  const spd = PADDLE_SPEED * dt;
+  const L = side > 0 ? binds.p1Left : binds.p2Left;
+  const R = side > 0 ? binds.p1Right : binds.p2Right;
+  const U = side > 0 ? binds.p1Up : binds.p2Up;
+  const D = side > 0 ? binds.p1Down : binds.p2Down;
+  if (keys.has(L)) target.x += side > 0 ? -spd : spd;   // P2's view is mirrored
+  if (keys.has(R)) target.x += side > 0 ? spd : -spd;
+  if (keys.has(U)) target.y += spd;
+  if (keys.has(D)) target.y -= spd;
+  const pad = side > 0 ? P1 : P2;
+  target.x = THREE.MathUtils.clamp(target.x, bounds.minX + pad.half.x, bounds.maxX - pad.half.x);
+  target.y = THREE.MathUtils.clamp(target.y, bounds.minY + pad.half.y, bounds.maxY - pad.half.y);
+}
+
+function guestTick(dt) {
+  now += dt;                 // the guest doesn't run update(), so tick time here
+  if (!online.target) return;
+  if (head.active) {
+    // Head tracking maps straight onto the guest's own half.
+    online.target = mapTouchToBounds(head.nx, head.ny, -1);
+  }
+  moveOnlineTarget(online.target, dt, -1);
+  P2.obj.position.x = online.target.x;
+  P2.obj.position.y = online.target.y;
+  P2.obj.position.z = P2.z;
+  if (room) room.send({ k: 'i', x: +online.target.x.toFixed(2), y: +online.target.y.toFixed(2) });
+  if (onlineSnap) applyOnlineSnapshot(onlineSnap);
+  // The opponent's paddle eases toward the last streamed position every frame.
+  if (online.p1Target) {
+    P1.obj.position.x = THREE.MathUtils.damp(P1.obj.position.x, online.p1Target.x, 18, dt);
+    P1.obj.position.y = THREE.MathUtils.damp(P1.obj.position.y, online.p1Target.y, 18, dt);
+    P1.obj.position.z = paddle1Z;
+  }
+  // Dead-reckon the ball between snapshots so it moves at a smooth 60fps.
+  const b = balls[0];
+  if (b.active) {
+    b.mesh.position.addScaledVector(b.vel, dt);
+    online.ballTarget.addScaledVector(b.vel, dt);
+    b.mesh.position.lerp(online.ballTarget, 1 - Math.exp(-10 * dt));
+  }
+}
+
+function applyOnlineSnapshot(s) {
+  if (!P1 || !P2) return;
+  online.p1Target = { x: s.p1[0], y: s.p1[1] };   // eased toward in guestTick
+  const b = balls[0];
+  if (s.b) {
+    if (!b.active) { b.active = true; b.mesh.visible = true; b.mesh.position.set(s.b[0], s.b[1], s.b[2]); }
+    online.ballTarget.set(s.b[0], s.b[1], s.b[2]);
+    b.vel.set(s.b[3], s.b[4], s.b[5]);
+  } else if (b.active) {
+    b.active = false; b.mesh.visible = false;
+  }
+  for (let i = 1; i < balls.length; i++) { balls[i].active = false; balls[i].mesh.visible = false; }
+  if (s.s1 !== score1 || s.s2 !== score2) { score1 = s.s1; score2 = s.s2; updateScore(); Audio.play('score'); }
+  if (s.cd > 0 && online.prevCd !== s.cd) showCount(String(s.cd));
+  else if (s.cd === -1 && online.prevCd !== -1) showCount('GO!');
+  else if (s.cd === 0 && (online.prevCd === -1 || online.prevCd > 0)) elCount.style.display = 'none';
+  online.prevCd = s.cd;
+  if (s.over && !matchOver) { matchOver = true; endMatch(); }
+  else if (!s.over && matchOver) { matchOver = false; elBanner.classList.remove('show'); Confetti.stop(); Audio.startMusic('game'); }
+  onlineSnap = null;
+}
+
+function renderSingle(cam) {
+  const w = window.innerWidth, h = window.innerHeight, a = w / h;
+  cam.aspect = a; cam.fov = fovForAspect(a); cam.updateProjectionMatrix();
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, w, h);
+  renderer.render(scene, cam);
+}
+
+// ---- Lobby wiring ---------------------------------------------------------
+document.getElementById('hostBtn').addEventListener('click', doHost);
+document.getElementById('joinBtn').addEventListener('click', () => doJoin(''));
+document.querySelector('[data-onconnect]').addEventListener('click', doConnect);
+joinCodeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.stopPropagation(); doConnect(); } });
+seatBtns.forEach((b) => b.addEventListener('click', () => setSeats(+b.dataset.seats)));
+elOnStart.addEventListener('click', startOnlineMatch);
+document.querySelector('[data-oncancel]').addEventListener('click', () => { closeRoom(); closeOnlineModal(); });
+document.querySelector('[data-oncopy]').addEventListener('click', async () => {
+  const code = elOnCode.textContent.trim();
+  if (!code) return;
+  const link = inviteLink(code);
+  try {
+    await navigator.clipboard.writeText(link);
+    setOnStatus('Invite link copied — paste it to your friend.');
+  } catch (e) {
+    setOnStatus(link);   // clipboard blocked: show it so it can be copied by hand
+  }
+});
+
+// Someone opened an invite link (…/?code=ABCD) → jump straight to joining.
+// Deferred a tick so the rest of this module has finished initialising.
+setTimeout(() => {
+  const codeParam = new URLSearchParams(window.location.search).get('code');
+  if (!codeParam) return;
+  doJoin(codeParam.toUpperCase());
+  setOnStatus('Invite code filled in — press CONNECT.');
+}, 0);
 
 // ---- Mobile on-screen controls (shown only on touch devices, in battle) ----
 function bindPress(el, fn) {
@@ -480,7 +999,7 @@ function pollPad() {
     if (startBtn) startGame(selectedBot);    // ✕ = start match
   } else if (matchOver) {
     if (startBtn) restartMatch();            // ✕ = rematch (same button)
-    if (l1 || r1) returnToMenu();
+    if (l1 || r1) { if (netRole) leaveOnline(); else returnToMenu(); }
   }
 }
 
@@ -516,6 +1035,7 @@ function mapTouchToBounds(nx, ny, side) {
   return { x: bx, y: by };
 }
 function handleClassicTouch(e) {
+  if (online) { handleOnlineTouch(e); return; }   // online = one full-screen view each
   if (polyActive || !bounds || !started || matchOver) return;
   e.preventDefault();
   p1Touch = null; p2Touch = null;
@@ -820,16 +1340,19 @@ function update(dt) {
   if (goUntil && now > goUntil) { elCount.style.display = 'none'; goUntil = 0; }
 
   updatePaddles(dt);
-  updateFire(dt);
-  updateEffects();
-  updateArenaSpin(dt);
+  if (!online) {          // power-ups / shotgun / hail are off in online 1v1
+    updateFire(dt);
+    updateEffects();
+    updateArenaSpin(dt);
+  }
   updateBalls(dt);
-  updateBullets(dt);
-  updateHail(dt);
-  updatePowerups(dt);
+  if (!online) {
+    updateBullets(dt);
+    updateHail(dt);
+    updatePowerups(dt);
+  }
   updateBursts(dt);
-  updateVines();
-  updateHudFx();
+  if (!online) { updateVines(); updateHudFx(); }
 }
 
 // ---- Gamepad helpers (PS4 via the Standard mapping) ----
@@ -857,9 +1380,22 @@ function updatePaddles(dt) {
   p1y += -axis(pad, 1);    // left stick Y (up is negative)
   P1.obj.position.x += p1x * s1;
   P1.obj.position.y += p1y * s1;
+  // Head tracking (if the setting is on) steers P1 straight to where you lean.
+  if (head.active) {
+    const t = mapTouchToBounds(head.nx, head.ny, +1);
+    P1.obj.position.x = t.x; P1.obj.position.y = t.y;
+  }
+  // Online host: the pointer/touch target also drives P1 (single full view).
+  if (online && online.role === 'host' && online.target && !head.active) {
+    moveOnlineTarget(online.target, dt, +1);
+    P1.obj.position.x = online.target.x; P1.obj.position.y = online.target.y;
+  }
 
-  // P2: bot AI, or bound keys + right stick (X inverted — cam2 faces the other way)
-  if (botEnabled) {
+  // P2: the other device online, bot AI, or bound keys + right stick.
+  if (online && online.role === 'host') {
+    P2.obj.position.x = online.remote.x;
+    P2.obj.position.y = online.remote.y;
+  } else if (botEnabled) {
     botMove(dt);
   } else {
     let p2x = 0, p2y = 0;
@@ -874,8 +1410,8 @@ function updatePaddles(dt) {
   }
 
   // Touch drag overrides keyboard/stick for that paddle this frame.
-  if (p1Touch) { P1.obj.position.x = p1Touch.x; P1.obj.position.y = p1Touch.y; }
-  if (p2Touch && !botEnabled) { P2.obj.position.x = p2Touch.x; P2.obj.position.y = p2Touch.y; }
+  if (p1Touch && !online) { P1.obj.position.x = p1Touch.x; P1.obj.position.y = p1Touch.y; }
+  if (p2Touch && !botEnabled && !online) { P2.obj.position.x = p2Touch.x; P2.obj.position.y = p2Touch.y; }
 
   for (const p of [P1, P2]) {
     p.obj.position.x = THREE.MathUtils.clamp(p.obj.position.x, bounds.minX + p.half.x, bounds.maxX - p.half.x);
@@ -1394,6 +1930,7 @@ function resetPlayState() {
 }
 
 function restartMatch() {
+  if (online && online.role === 'guest') return;  // the host calls the rematch
   score1 = 0; score2 = 0; matchOver = false;
   Confetti.stop();
   Audio.startMusic('game');
@@ -1410,8 +1947,11 @@ function returnToMenu() {
   matchOver = false; started = false; botEnabled = false;
   countdown = 0; goUntil = 0; elCount.style.display = 'none';
   elBanner.classList.remove('show');
+  online = null; onlineSnap = null;
+  const p1name = document.querySelector('[data-p1name]');
+  if (p1name) p1name.textContent = 'PLAYER 1';
   document.body.classList.add('pregame');
-  document.body.classList.remove('solo');
+  document.body.classList.remove('solo', 'online', 'guest');
   elStart.classList.remove('hidden');
   score1 = 0; score2 = 0; updateScore();
   resetPlayState();
@@ -1437,6 +1977,17 @@ function animate() {
     : (started && !matchOver);
   document.body.classList.toggle('inbattle', inBattle);
   if (polyActive && polyGame) { polyGame.update(dt); polyGame.render(); return; }
+  if (online) {
+    // Online 1v1: each side simulates or predicts, and renders its own camera.
+    if (ready) {
+      if (online.role === 'host') { pollPad(); update(dt); sendSnapshot(dt); }
+      else guestTick(dt);
+      positionCameras();
+    }
+    if (toastTimer && now > toastTimer) { elToast.classList.remove('show'); toastTimer = 0; }
+    renderSingle(online.role === 'host' ? cam1 : cam2);
+    return;
+  }
   if (ready) pollPad();
   update(dt);
   updateGuns(dt);
